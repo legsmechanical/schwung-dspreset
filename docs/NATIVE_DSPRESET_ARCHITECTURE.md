@@ -1,5 +1,18 @@
 # Native DSPreset architecture
 
+## Module package contract
+
+The authoritative package contract is Schwung upstream's
+[`docs/MODULES.md`](https://github.com/charlesvestal/schwung/blob/main/docs/MODULES.md),
+not Multisampler's existing `module.json`. This project is a
+`sound_generator` using API version 2, so its eventual package must use the
+module id as its directory name and ship the DSP binary as `dsp.so`.
+
+`module.json` will remain a small, standards-compliant declaration. It will
+advertise only the capabilities actually implemented by the native engine;
+compatibility features must not be implied through inherited Multisampler
+metadata.
+
 ## Contract
 
 `schwung-dspreset` accepts `.dspreset` directly. It does not generate an SFZ
