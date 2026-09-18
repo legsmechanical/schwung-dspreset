@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# Build Multisampler module for Schwung (ARM64).
-#
-# Module id stays "sfz" for seamless upgrades from the previous SFZ Player
-# (the build paths, tarball name, and on-device install dir keep that name
-# too). User-facing name is "Multisampler"; see module.json.
-#
-# Uses xsynth as the engine. Cross-compile via Docker, which carries both
-# aarch64-linux-gnu-gcc and a Rust nightly + the aarch64-unknown-linux-gnu
-# target.
+# Build the native DSPreset module for Schwung (ARM64).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,33 +26,19 @@ fi
 CROSS_PREFIX="${CROSS_PREFIX:-aarch64-linux-gnu-}"
 cd "$REPO_ROOT"
 
-echo "=== Building Multisampler (xsynth) ==="
+echo "=== Building DSPreset ==="
 echo "Cross prefix: $CROSS_PREFIX"
 
-mkdir -p build dist/sfz
+mkdir -p build dist/dspreset
 
-# --- Step 1: Build xsynth_shim (Rust staticlib) ---
-echo ""
-echo "=== Building xsynth shim ==="
-SHIM_DIR="src/dsp/third_party/xsynth_shim"
-if [ ! -f "$SHIM_DIR/Cargo.toml" ]; then
-    echo "Error: xsynth_shim crate missing. Did you run 'git submodule update --init'?"
-    exit 1
-fi
-# Pinned nightly date — see scripts/Dockerfile for why this isn't the
-# floating "nightly" channel.
-RUST_NIGHTLY_DATE="${RUST_NIGHTLY_DATE:-2026-05-18}"
-( cd "$SHIM_DIR" && cargo "+nightly-${RUST_NIGHTLY_DATE}" build --release --target aarch64-unknown-linux-gnu )
-XSHIM_A="$SHIM_DIR/target/aarch64-unknown-linux-gnu/release/libxsynth_shim.a"
-if [ ! -f "$XSHIM_A" ]; then
-    echo "Error: shim staticlib missing at $XSHIM_A"
-    exit 1
-fi
-
-# --- Step 2: Compile and link the plugin ---
+# Compile the direct XML/region/WAV/cache engine and its V2 wrapper.
 echo ""
 echo "=== Compiling DSP plugin ==="
-for src in src/dsp/xsynth_plugin.c src/dsp/dspreset_to_xsynth_sfz.c; do
+for src in src/dsp/dspreset_plugin.c \
+           src/dsp/dspreset/native_engine.c src/dsp/dspreset/region_map.c \
+           src/dsp/dspreset/dspreset_parser.c src/dsp/dspreset/library_input.c \
+           src/dsp/dspreset/voice.c src/dsp/dspreset/page_cache.c \
+           src/dsp/dspreset/wav_source.c; do
     obj="build/$(basename "$src" .c).o"
     ${CROSS_PREFIX}gcc -O3 -fPIC \
         -march=armv8-a -mtune=cortex-a72 \
@@ -70,38 +48,32 @@ for src in src/dsp/xsynth_plugin.c src/dsp/dspreset_to_xsynth_sfz.c; do
         -Isrc/dsp
 done
 
-# Link the plugin as a shared lib. The shim staticlib pulls in xsynth-core,
-# symphonia (audio decoders), rayon, and the rest of the Rust runtime. C++
-# stdlib isn't needed anymore (sfizz dropped). libdl, libpthread, libm, librt
-# all required by Rust's std and rayon.
 echo "=== Linking dsp.so ==="
 ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -march=armv8-a -mtune=cortex-a72 \
-    build/xsynth_plugin.o \
-    build/dspreset_to_xsynth_sfz.o \
-    "$XSHIM_A" \
+    build/dspreset_plugin.o build/native_engine.o build/region_map.o \
+    build/dspreset_parser.o build/library_input.o build/voice.o \
+    build/page_cache.o build/wav_source.o \
     -o build/dsp.so \
-    -lm -lpthread -ldl -lrt -lz
+    -lm -lpthread -lz
 
 echo "DSP plugin linked"
 
 # --- Step 3: Package ---
 echo ""
 echo "=== Packaging ==="
-cat src/module.json > dist/sfz/module.json
-cat src/ui.js > dist/sfz/ui.js
-cat build/dsp.so > dist/sfz/dsp.so
-[ -f src/help.json ] && cat src/help.json > dist/sfz/help.json
-chmod +x dist/sfz/dsp.so
-mkdir -p dist/sfz/instruments
+cat src/module.json > dist/dspreset/module.json
+cat build/dsp.so > dist/dspreset/dsp.so
+chmod +x dist/dspreset/dsp.so
+mkdir -p dist/dspreset/instruments
 
 cd dist
-tar -czvf sfz-module.tar.gz sfz/
+tar -czvf dspreset-module.tar.gz dspreset/
 cd ..
 
 echo ""
 echo "=== Build Complete ==="
-echo "Output: dist/sfz/"
-echo "Tarball: dist/sfz-module.tar.gz"
+echo "Output: dist/dspreset/"
+echo "Tarball: dist/dspreset-module.tar.gz"
 echo ""
 echo "To install on Move:  ./scripts/install.sh"

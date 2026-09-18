@@ -1,12 +1,11 @@
 {
-  "id": "sfz",
-  "name": "Multisampler",
-  "abbrev": "MSP",
-  "version": "0.6.5",
-  "description": "Multisample instrument player for SFZ and DecentSampler libraries — pianos, keys, drums, orchestral, and more.",
-  "author": "charlesvestal",
+  "id": "dspreset",
+  "name": "DSPreset",
+  "abbrev": "DSR",
+  "version": "0.1.0",
+  "description": "Native DecentSampler DSPreset player with worker-driven disk streaming and DSLibrary import.",
+  "author": "legsmechanical",
   "license": "LGPL-3.0",
-  "ui": "ui.js",
   "dsp": "dsp.so",
   "api_version": 2,
   "capabilities": {
@@ -20,67 +19,24 @@
     "ui_hierarchy": {
       "levels": {
         "root": {
-          "name": "Multisample",
+          "name": "DSPreset",
           "params": [
             {
-              "key": "preset",
-              "label": "Instrument",
-              "type": "int",
-              "min": 0,
-              "max_param": "preset_count",
-              "default": 0
-            },
-            {
-              "key": "octave_transpose",
-              "label": "Octave",
-              "type": "int",
-              "min": -4,
-              "max": 4,
-              "default": 0
+              "key": "preset_path",
+              "name": "Library",
+              "type": "filepath",
+              "root": "/data/UserData",
+              "filter": [".dspreset", ".dslibrary"],
+              "default": ""
             },
             {
               "key": "gain",
-              "label": "Gain",
+              "name": "Gain",
               "type": "float",
               "min": 0,
               "max": 2,
               "default": 0.7
-            },
-            {
-              "key": "funverb",
-              "label": "Funverb",
-              "type": "float",
-              "min": 0,
-              "max": 1,
-              "default": 0.0
-            },
-            {
-              "key": "voices",
-              "label": "Voices",
-              "type": "int",
-              "min": 4,
-              "max": 128,
-              "default": 14
-            },
-            {
-              "key": "knob_preset",
-              "short_name": "Preset",
-              "label": "Knob Preset",
-              "type": "int",
-              "min": 0,
-              "max": 7,
-              "default": 0
             }
-          ],
-          "knobs": [
-            "knob_0",
-            "knob_1",
-            "knob_2",
-            "knob_3",
-            "knob_4",
-            "knob_5",
-            "knob_6",
-            "knob_7"
           ]
         }
       }
@@ -90,15 +46,13 @@
     "path": "instruments",
     "label": "Sample Libraries",
     "extensions": [
-      ".sfz",
-      ".dspreset"
+      ".dspreset",
+      ".dslibrary"
     ],
-    "description": "Upload SFZ or DecentSampler sample libraries. Either folders containing .sfz/.dspreset files plus sample audio, or loose .sfz files with samples in an adjacent folder.",
-    "hint": "Find free sample libraries at",
-    "hint_url": "https://sfzinstruments.github.io/",
-    "hint_url_label": "SFZ Instruments"
+    "description": "Load DecentSampler DSPreset files or DSLibrary packages. DSLibrary files are unpacked and validated by a background importer before playback.",
+    "hint": "DSPreset and DSLibrary only"
   },
   "defaults": {
-    "preset": 0
+    "gain": 0.7
   }
 }
