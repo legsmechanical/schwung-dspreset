@@ -204,7 +204,7 @@ int main(void) {
         for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
         CHECK(plugin_uint(&p, "load_count") == 2);
         CHECK(plugin_uint(&p, "amp_override") == 0);
-        CHECK(plugin_uint(&p, "polyphony") == 4);            /* a playing setting: it stays */
+        CHECK(plugin_uint(&p, "polyphony") == 0);            /* back to "Preset" too */
         plugin_get(&p, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "1.2500"));
         p.api->set_param(p.instance, "preset", "0");
         for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }

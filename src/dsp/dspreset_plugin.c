@@ -244,9 +244,9 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
         in->restore_path[0] = '\0';
     }
     atomic_store(&in->ctl_dirty, 0);
-    /* A preset CHOSEN starts with Override off (Josh, 2026-09-18); a project
-     * reopening keeps the Override it was saved with. */
-    if (!restoring) atomic_store(&in->amp_on, 0);
+    /* A preset CHOSEN starts with Override off and Polyphony at "Preset" (Josh,
+     * 2026-09-18); a project reopening keeps what it was saved with. */
+    if (!restoring) { atomic_store(&in->amp_on, 0); atomic_store(&in->polyphony, 0); }
     if (!atomic_load(&in->amp_on)) {          /* Override off: the knobs show the preset's own envelope */
         float env[4];
         if (ds_native_engine_preset_envelope(next, env))

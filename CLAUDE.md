@@ -112,8 +112,8 @@ on knob 1 they straddled the row break and both hosts drew four faders — every
 green. `tests/test_pages.mjs` lays the pages out with the hosts' own planner
 (`DSPRESET_PAGES_DIR`) and fails if the envelope is not drawn.
 
-**Choosing a preset turns Override off** (Josh, 2026-09-18); a project reopening keeps the
-Override it was saved with (`restoring` in `load_target`).
+**Choosing a preset turns Override off and Polyphony back to "Preset"** (Josh, 2026-09-18); a
+project reopening keeps both as saved (`restoring` in `load_target`).
 Override off: the preset's envelope plays, and after each load the knobs are set to it (from its
 first playable zone), so switching On changes nothing until a knob moves. On: the knobs REPLACE
 the preset's values — even a `<sample>`'s own — so releases can be lengthened. Zones with no amp
@@ -125,7 +125,8 @@ call and block; a Sustain moved while a note is held glides there (≥ 20 ms). `
 NOTES — every layer a key plays is one note (`voice.note_id`) — not voices. Over the limit, a
 new note fades the oldest out in 5 ms (`choke_note`), released notes before held ones, oldest
 first within each. "Preset" = no limit of ours (DecentSampler has only per-TAG polyphony, not
-implemented yet). A playing setting: it survives a preset change. `state` saves `"polyphony"`.
+implemented yet). Like Override, a CHOSEN preset resets it to "Preset" (Josh, 2026-09-18); a
+project reopening keeps it. `state` saves `"polyphony"`.
 
 ## Modulators
 
