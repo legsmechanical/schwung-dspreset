@@ -19,7 +19,7 @@ int main(void) {
     write_text(path, "<DecentSampler><groups><group>"
                      "<sample path=\"s.wav\" rootNote=\"60\" start=\"20000\" release=\"0.1\"/>"
                      "</group></groups></DecentSampler>");
-    CHECK(ds_native_engine_load(&engine, path, 44100, error, sizeof(error)) == 0);
+    CHECK(ds_native_engine_load(&engine, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
     CHECK(engine.zones[0].streams && engine.zones[0].start == 20000);
 
     ds_native_engine_note_on(&engine, 60, 127);

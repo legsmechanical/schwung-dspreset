@@ -17,10 +17,13 @@ Not yet: DecentSampler's effects, on-screen knobs and buttons, and modulators.
 
 ## Using it
 
-Put libraries in `/data/UserData/schwung/modules/sound_generators/dspreset/instruments/` (the
-browser opens there), add DSPreset to a track, and pick a file with **Library**. A `.dslibrary`
-loads its first preset; to pick a different one, browse into `<name>.dslibrary.unpacked/` and
-choose its `.dspreset`.
+Put libraries in `/data/UserData/schwung/modules/sound_generators/dspreset/instruments/`. Each
+folder, `.dslibrary` or loose `.dspreset` there is a **bank**.
+
+In the module's pages, **Presets** lists the current bank's presets — scroll and stop, and the one
+you stop on loads. **Banks** lists every bank; choose one and you land back on its presets. A
+`.dslibrary` is unpacked the first time you choose it (its name reads "Unpacking..." meanwhile).
+Your bank and preset are saved with the project.
 
 ## Building
 

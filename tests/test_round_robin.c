@@ -31,7 +31,7 @@ int main(void) {
                      "<sample path=\"rr4.wav\" rootNote=\"60\" seqPosition=\"4\"/>"
                      "</group><group trigger=\"release\" seqMode=\"always\"><sample path=\"rel.wav\" rootNote=\"60\"/></group>"
                      "</groups></DecentSampler>");
-    CHECK(ds_native_engine_load(&e, path, 44100, error, sizeof(error)) == 0);
+    CHECK(ds_native_engine_load(&e, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
     for (int hit = 0; hit < 6; ++hit) {
         ds_native_engine_note_on(&e, 60, 100);
         if (strcmp(played(&e), want[hit])) {

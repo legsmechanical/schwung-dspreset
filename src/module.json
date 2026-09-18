@@ -2,7 +2,7 @@
   "id": "dspreset",
   "name": "DSPreset",
   "abbrev": "DSR",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native DecentSampler DSPreset player with worker-driven disk streaming and DSLibrary import.",
   "author": "legsmechanical",
   "license": "LGPL-3.0",
@@ -17,30 +17,61 @@
     "chainable": true,
     "component_type": "sound_generator",
     "ui_hierarchy": {
+      "_comment": "Mirror of the ui_hierarchy the plugin returns from get_param; the plugin is authoritative.",
       "levels": {
         "root": {
           "name": "DSPreset",
+          "list_param": "preset",
+          "count_param": "preset_count",
+          "name_param": "preset_name",
           "params": [
             {
-              "key": "preset_path",
-              "name": "Library",
-              "type": "filepath",
-              "root": "/data/UserData",
-              "filter": [".dspreset", ".dslibrary"],
-              "default": ""
+              "level": "banks",
+              "label": "Banks"
             },
             {
               "key": "gain",
-              "name": "Gain",
-              "type": "float",
-              "min": 0,
-              "max": 2,
-              "default": 0.7
+              "name": "Gain"
             }
+          ],
+          "knobs": [
+            "gain"
           ]
+        },
+        "banks": {
+          "name": "Banks",
+          "label": "Select Bank",
+          "items_param": "bank_list",
+          "select_param": "bank",
+          "navigate_to": "root"
         }
       }
-    }
+    },
+    "chain_params": [
+      {
+        "key": "preset",
+        "name": "Preset",
+        "type": "int",
+        "min": 0,
+        "max": 0
+      },
+      {
+        "key": "bank",
+        "name": "Bank",
+        "type": "int",
+        "min": 0,
+        "max": 0
+      },
+      {
+        "key": "gain",
+        "name": "Gain",
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.02,
+        "default": 0.7
+      }
+    ]
   },
   "assets": {
     "path": "instruments",
@@ -49,7 +80,7 @@
       ".dspreset",
       ".dslibrary"
     ],
-    "description": "Load DecentSampler DSPreset files or DSLibrary packages. DSLibrary files are unpacked and validated by a background importer before playback.",
+    "description": "Each folder, .dslibrary or .dspreset here is a bank in the Banks list. A .dslibrary is unpacked beside itself the first time its bank is chosen.",
     "hint": "DSPreset and DSLibrary only"
   },
   "defaults": {

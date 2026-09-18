@@ -20,6 +20,7 @@ that tree is still here and is **not built** — see *Vestigial* below.
 | `src/dsp/dspreset_plugin.c` | API v2 wrapper. Worker thread: loads presets, unpacks `.dslibrary`, streams. Swaps engines atomically and frees the old one once no audio call holds it. |
 | `src/dsp/dspreset/dspreset_parser.c` | XML → zones. `<groups>` → `<group>` → `<sample>` inheritance; volumes multiply, `groupTuning` adds; whitespace around `=`, entities and comments are handled. |
 | `src/dsp/dspreset/native_engine.c` | Zones, resident heads, per-voice stream rings, envelopes, round robin, render. |
+| `src/dsp/dspreset/catalog.c` | The Banks list: each top-level folder / `.dslibrary` / loose `.dspreset` under `<module>/instruments/`, its presets in natural order. |
 | `src/dsp/dspreset/wav_source.c` | WAV reader (PCM16/24/32, float32, EXTENSIBLE), block `pread`s, the file's own `smpl` loop. |
 | `src/dsp/dspreset/{library_*,zip_*}.c` | `.dslibrary` → `<file>.dslibrary.unpacked/`, transactionally. |
 
@@ -39,6 +40,26 @@ that tree is still here and is **not built** — see *Vestigial* below.
   else — a library of 540 files kept open broke it. `test_real_libraries` pins the count.
 - Audio thread: no I/O, no allocation, no locks. Ring pages are touched at load.
 
+## Banks and presets (what both hosts show)
+
+The hierarchy is OB-Xd's shape, so stock's editor and dAVEBOx's module pages both draw it: root
+carries the preset browser (`preset` / `preset_count` / `preset_name` → a **Presets** page, first),
+and a `banks` level is an items list (`bank_list` / `bank`, `navigate_to: root`) → a **Banks**
+page. In dAVEBOx that is the module editor (Sound → the DSPreset block → jog the pages), plus the
+jog-click picker's "DSPreset Presets" row.
+
+- **A selection loads only once it has been still for `SETTLE_MS` (150 ms)**, and a newer
+  selection cancels a load in progress. dAVEBOx learns names by writing every index and reading
+  `preset_name` back; that must stay free, or it would load every library. `preset_name` names
+  the SELECTED preset from the catalog — never the loaded one.
+- Choosing an unpacked `.dslibrary` bank unpacks it on the worker (`<name>.dslibrary.unpacked/`,
+  hidden from the list), then plays its first preset.
+- `state` is `{"preset_path","gain"}`; restoring it selects that bank/preset and loads at once. A
+  new instance with nothing restored picks the first playable bank after `FIRST_PICK_MS`.
+- **get_param/set_param may run on the audio thread**: no locks, no I/O, no allocation. Strings
+  cross via seqlocks; the catalog is published whole and old ones live until destroy.
+- `preset_path` still loads any file directly (a bank of its own, "File").
+
 ## Defaults DecentSampler does not document
 
 Release 0.5 s when a preset sets none (the old Multisampler's finding: a near-zero release cuts
@@ -48,9 +69,7 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 ## Not implemented yet
 
 Effects (`<effects>`), `<ui>` knob/button bindings, `<modulators>`, tags/`silencedByTags`, loop
-crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers, choosing among
-several presets inside one `.dslibrary` (the natural-order first loads; a `.dspreset` inside
-`.unpacked/` can be picked directly). There is no read-only param type, so load status is logged
+crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers. There is no read-only param type, so load status is logged
 (`dspreset: loaded …` / `load failed …`) and served as the `status` get_param key, not shown.
 
 ## Build, test, deploy

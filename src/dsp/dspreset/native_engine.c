@@ -84,7 +84,8 @@ static void resolve_bounds(ds_zone_t *z, const ds_source_t *s) {
 }
 
 int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
-                          unsigned output_rate, char *error, unsigned error_len) {
+                          unsigned output_rate, ds_cancel_fn cancelled, void *cancel_context,
+                          char *error, unsigned error_len) {
     char directory[1024], path[1600], *slash;
     collect_t collect;
     if (!e || !preset_path || !output_rate) return -1;
@@ -122,6 +123,12 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     for (unsigned i = 0; i < e->source_count; ++i) {
         ds_source_t *s = &e->sources[i];
         char read_error[128];
+        if (cancelled && cancelled(cancel_context)) {
+            fail(error, error_len, "cancelled");
+            for (unsigned j = i; j < e->source_count; ++j) ds_wav_source_close(&e->sources[j].file);
+            ds_native_engine_destroy(e);
+            return DS_LOAD_CANCELLED;
+        }
         if (s->file.fd < 0 || !s->file.frame_count) continue;
         if (s->file.frame_count <= DS_RESIDENT_FRAMES) s->resident = 1;
         s->head_frames = s->resident ? s->file.frame_count : DS_HEAD_FRAMES;

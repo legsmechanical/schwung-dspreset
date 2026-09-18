@@ -83,8 +83,13 @@ typedef struct {
 
 /* Loading is worker-only: parses XML, opens files, reads every resident head.
  * Missing sample files are skipped and counted, never fatal. */
+typedef int (*ds_cancel_fn)(void *context);
+/* `cancelled` (optional) is polled between files; a load it stops returns
+ * DS_LOAD_CANCELLED and leaves nothing allocated. */
+#define DS_LOAD_CANCELLED (-2)
 int ds_native_engine_load(ds_native_engine_t *engine, const char *preset_path,
-                          unsigned output_rate, char *error, unsigned error_len);
+                          unsigned output_rate, ds_cancel_fn cancelled, void *cancel_context,
+                          char *error, unsigned error_len);
 void ds_native_engine_destroy(ds_native_engine_t *engine);
 
 /* Audio thread: no I/O, no allocation, no locks. */

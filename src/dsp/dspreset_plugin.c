@@ -1,15 +1,16 @@
 #define _DEFAULT_SOURCE
-#include <ctype.h>
 #include <stdatomic.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
+#include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "dspreset/catalog.h"
 #include "dspreset/library_input.h"
 #include "dspreset/library_preparer.h"
 #include "dspreset/native_engine.h"
@@ -19,171 +20,298 @@
 typedef struct host_api_v1 { uint32_t api_version; int sample_rate, frames_per_block; uint8_t *mapped_memory; int audio_out_offset, audio_in_offset; void (*log)(const char *); int (*midi_send_internal)(const uint8_t *, int); int (*midi_send_external)(const uint8_t *, int); } host_api_v1_t;
 typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(const char *, const char *); void (*destroy_instance)(void *); void (*on_midi)(void *, const uint8_t *, int, int); void (*set_param)(void *, const char *, const char *); int (*get_param)(void *, const char *, char *, int); int (*get_error)(void *, char *, int); void (*render_block)(void *, int16_t *, int); } plugin_api_v2_t;
 
+/* How long a selection must stay put before it loads. Scrolling the preset
+ * list — or a host walking every index to learn the names — never loads the
+ * presets it passes. */
+#define SETTLE_MS 150
+#define RESCAN_MS 5000
+/* A new instance waits this long for a restored state before choosing a first
+ * preset itself, so a project reopening never loads something it then drops. */
+#define FIRST_PICK_MS 500
+#define NO_BANK (-2)                    /* nothing chosen yet */
+#define FILE_BANK (-1)                  /* a file outside the catalog */
+
 static const host_api_v1_t *g_host;
+
+/* ---- lock-free publication ----------------------------------------------
+ * get_param/set_param can be served on the audio thread, so nothing they touch
+ * may lock. Strings cross threads through a seqlock: one writer, readers retry
+ * if a write overlapped their copy. */
+/* 1024 = the path buffers every reader uses; a longer status line is cut, a
+ * longer PATH would never compare equal to itself, so paths are capped at 1023. */
+typedef struct { _Atomic uint32_t seq; char text[1024]; } seqstr_t;
+
+static void seqstr_write(seqstr_t *s, const char *text) {
+    uint32_t seq = atomic_load_explicit(&s->seq, memory_order_relaxed);
+    atomic_store_explicit(&s->seq, seq + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    snprintf(s->text, sizeof(s->text), "%.1023s", text);
+    atomic_store_explicit(&s->seq, seq + 2, memory_order_release);
+}
+
+static void seqstr_read(seqstr_t *s, char *out, size_t n) {
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        uint32_t a = atomic_load_explicit(&s->seq, memory_order_acquire), b;
+        if (a & 1) continue;
+        snprintf(out, n, "%s", s->text);
+        atomic_thread_fence(memory_order_acquire);
+        b = atomic_load_explicit(&s->seq, memory_order_relaxed);
+        if (a == b) return;
+    }
+    if (n) out[0] = '\0';
+}
+
+typedef struct retired { ds_catalog_t *catalog; struct retired *next; } retired_t;
 
 typedef struct {
     _Atomic(ds_native_engine_t *) active;
-    _Atomic int audio_users;            /* >0 while on_midi/render_block hold `active` */
+    _Atomic int audio_users;            /* >0 while an audio-side call holds `active` */
+    _Atomic(ds_catalog_t *) catalog;    /* immutable once published */
+    _Atomic int sel_bank, sel_preset;   /* bank may be FILE_BANK or NO_BANK */
+    _Atomic uint32_t sel_gen;           /* bumped by every selection change */
+    _Atomic int unpacking_bank, loading, worker_running;
+    _Atomic uint32_t load_count;        /* engines actually built, for tests */
+    _Atomic float gain;
+    seqstr_t request;                   /* preset_path / state from the host */
+    _Atomic uint32_t request_gen;
+    seqstr_t status, loaded_path;
     pthread_t worker;
-    pthread_mutex_t lock;               /* guards the strings below; never taken by audio */
-    char requested_path[1024], preset_path[1024], loaded_path[1024], status[256], error[256], module_dir[512];
-    _Atomic int worker_running, loading;
-    float gain;
+    char module_dir[512], instruments[600];
+    /* worker only */
+    retired_t *retired;
+    char direct_path[1024];
 } dspreset_instance_t;
 
-static void log_line(const char *fmt, const char *a, const char *b) {
-    char line[1400];
+static uint64_t now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+static void log_line(const char *text) {
+    char line[1600];
     if (!g_host || !g_host->log) return;
-    snprintf(line, sizeof(line), fmt, a, b);
+    snprintf(line, sizeof(line), "dspreset: %s", text);
     g_host->log(line);
 }
 
-static void set_status(dspreset_instance_t *in, const char *status, const char *error) {
-    pthread_mutex_lock(&in->lock);
-    snprintf(in->status, sizeof(in->status), "%s", status);
-    snprintf(in->error, sizeof(in->error), "%s", error ? error : "");
-    pthread_mutex_unlock(&in->lock);
+static void select_bank_preset(dspreset_instance_t *in, int bank, int preset) {
+    atomic_store(&in->sel_bank, bank);
+    atomic_store(&in->sel_preset, preset);
+    atomic_fetch_add(&in->sel_gen, 1);
 }
 
-static int has_suffix(const char *path, const char *suffix) {
-    size_t path_len = strlen(path), suffix_len = strlen(suffix);
-    return path_len >= suffix_len && !strcasecmp(path + path_len - suffix_len, suffix);
+/* ---- worker ------------------------------------------------------------- */
+
+static void publish_catalog(dspreset_instance_t *in, ds_catalog_t *next) {
+    ds_catalog_t *old = atomic_load(&in->catalog);
+    retired_t *node;
+    if (old && ds_catalog_equal(old, next)) { ds_catalog_free(next); return; }
+    atomic_store(&in->catalog, next);
+    /* Readers hold no reference count, so an old catalog lives until destroy.
+     * It only changes when the instruments folder does. */
+    if (old && (node = malloc(sizeof(*node)))) { node->catalog = old; node->next = in->retired; in->retired = node; }
 }
 
-/* "2 - Foundation" before "10 - Moog Town". */
-static int natural_compare(const char *a, const char *b) {
-    while (*a && *b) {
-        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
-            unsigned long x = strtoul(a, (char **)&a, 10), y = strtoul(b, (char **)&b, 10);
-            if (x != y) return x < y ? -1 : 1;
-            continue;
-        }
-        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
-            return tolower((unsigned char)*a) - tolower((unsigned char)*b);
-        ++a; ++b;
-    }
-    return (unsigned char)*a - (unsigned char)*b;
+static void rescan(dspreset_instance_t *in) {
+    ds_catalog_t *next = ds_catalog_scan(in->instruments);
+    if (next) publish_catalog(in, next);
 }
 
-/* The natural-order first DSPreset under `directory`. */
-static void first_preset(const char *directory, char *best, size_t best_len, int depth) {
-    DIR *dir = opendir(directory);
-    struct dirent *entry;
-    if (!dir || depth > 5) { if (dir) closedir(dir); return; }
-    while ((entry = readdir(dir)) != NULL) {
-        char path[1024]; struct stat st;
-        if (entry->d_name[0] == '.' || !strcmp(entry->d_name, "__MACOSX")) continue;
-        if (snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name) >= (int)sizeof(path) || stat(path, &st)) continue;
-        if (S_ISDIR(st.st_mode)) first_preset(path, best, best_len, depth + 1);
-        else if (S_ISREG(st.st_mode) && has_suffix(path, ".dspreset") && (!best[0] || natural_compare(path, best) < 0))
-            snprintf(best, best_len, "%s", path);
-    }
-    closedir(dir);
-}
-
-static int prepare_input(const char *request, char *preset_path, size_t preset_len,
-                         char *error, unsigned error_len) {
-    ds_library_input_kind_t kind = ds_classify_library_input(request, 0);
-    if (kind == DS_LIBRARY_INPUT_PRESET_FILE) {
-        return snprintf(preset_path, preset_len, "%s", request) >= (int)preset_len ? -1 : 0;
-    }
-    if (kind == DS_LIBRARY_INPUT_DSLIBRARY_ARCHIVE) {
-        char destination[1024]; struct stat st; ds_library_prepare_result_t result;
-        if (snprintf(destination, sizeof(destination), "%s.unpacked", request) >= (int)sizeof(destination)) return -1;
-        if (stat(destination, &st)) {
-            if (ds_library_prepare_archive(request, destination, &result, error, error_len)) return -1;
-        } else if (!S_ISDIR(st.st_mode)) {
-            snprintf(error, error_len, "%s", "DSLibrary cache path is not a directory"); return -1;
-        }
-        preset_path[0] = '\0';
-        first_preset(destination, preset_path, preset_len, 0);
-        if (!preset_path[0]) { snprintf(error, error_len, "%s", "prepared DSLibrary has no DSPreset"); return -1; }
-        return 0;
-    }
-    snprintf(error, error_len, "%s", "unsupported library input"); return -1;
-}
-
-/* Frees `old` once no audio call can still be using it: anything that enters
- * after the swap reads the new pointer, so one moment with no users is enough. */
-static void retire(dspreset_instance_t *in, ds_native_engine_t *old) {
+static void retire_engine(dspreset_instance_t *in, ds_native_engine_t *old) {
     if (!old) return;
-    while (atomic_load(&in->audio_users)) usleep(200);
+    while (atomic_load(&in->audio_users)) usleep(200);   /* anyone after the swap sees the new one */
     ds_native_engine_destroy(old);
     free(old);
 }
 
-static void load_request(dspreset_instance_t *in, const char *request) {
-    char preset[1024] = {0}, error[256] = {0}, status[256];
-    ds_native_engine_t *next = calloc(1, sizeof(*next));
-    unsigned rate = g_host && g_host->sample_rate > 0 ? (unsigned)g_host->sample_rate : 44100;
-    const char *name;
-    set_status(in, "Loading...", NULL);
-    if (!next || prepare_input(request, preset, sizeof(preset), error, sizeof(error)) ||
-        ds_native_engine_load(next, preset, rate, error, sizeof(error))) {
-        free(next);
-        snprintf(status, sizeof(status), "Error: %s", error[0] ? error : "cannot load DSPreset");
-        set_status(in, status, error[0] ? error : "cannot load DSPreset");
-        log_line("dspreset: load failed: %s (%s)", error, request);
+typedef struct { dspreset_instance_t *in; uint32_t gen; } cancel_ctx_t;
+static int superseded(void *opaque) {
+    cancel_ctx_t *c = opaque;
+    return atomic_load(&c->in->sel_gen) != c->gen || !atomic_load(&c->in->worker_running);
+}
+
+/* The .dspreset the current selection means, or "" if there is none yet. */
+static void selected_target(dspreset_instance_t *in, char *out, size_t n, int *needs_unpack) {
+    ds_catalog_t *c = atomic_load(&in->catalog);
+    int bank = atomic_load(&in->sel_bank), preset = atomic_load(&in->sel_preset);
+    *needs_unpack = 0;
+    out[0] = '\0';
+    if (bank == FILE_BANK) { snprintf(out, n, "%s", in->direct_path); return; }
+    if (!c || bank < 0 || bank >= (int)c->bank_count) return;   /* NO_BANK: nothing yet */
+    if (c->banks[bank].kind == DS_BANK_DSLIBRARY && !c->banks[bank].prepared) {
+        *needs_unpack = 1;
+        snprintf(out, n, "%s", c->banks[bank].path);
         return;
     }
-    name = strrchr(preset, '/') ? strrchr(preset, '/') + 1 : preset;
+    if (preset >= 0 && preset < (int)c->banks[bank].preset_count)
+        snprintf(out, n, "%s", c->banks[bank].preset_paths[preset]);
+}
+
+static int unpack_bank(dspreset_instance_t *in, const char *archive, int bank) {
+    int rc;
+    char destination[1100], error[256] = {0}, line[1400];
+    ds_library_prepare_result_t result;
+    atomic_store(&in->unpacking_bank, bank);
+    seqstr_write(&in->status, "Unpacking...");
+    snprintf(destination, sizeof(destination), "%s.unpacked", archive);
+    rc = ds_library_prepare_archive(archive, destination, &result, error, sizeof(error));
+    if (rc) {
+        snprintf(line, sizeof(line), "Error: %s", error[0] ? error : "cannot unpack");
+        seqstr_write(&in->status, line);
+        snprintf(line, sizeof(line), "unpack failed: %s (%s)", error, archive);
+        log_line(line);
+    } else {
+        snprintf(line, sizeof(line), "unpacked %u files from %s", result.extracted_files, archive);
+        log_line(line);
+    }
+    rescan(in);
+    atomic_store(&in->unpacking_bank, -1);
+    return rc;
+}
+
+static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) {
+    char error[256] = {0}, status[512];
+    ds_native_engine_t *next = calloc(1, sizeof(*next));
+    unsigned rate = g_host && g_host->sample_rate > 0 ? (unsigned)g_host->sample_rate : 44100;
+    cancel_ctx_t cancel = {in, gen};
+    const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    int rc;
+    if (!next) return -1;
+    seqstr_write(&in->status, "Loading...");
+    atomic_store(&in->loading, 1);
+    rc = ds_native_engine_load(next, path, rate, superseded, &cancel, error, sizeof(error));
+    atomic_store(&in->loading, 0);
+    if (rc) {
+        free(next);
+        if (rc == DS_LOAD_CANCELLED) return rc;
+        snprintf(status, sizeof(status), "Error: %s", error[0] ? error : "cannot load DSPreset");
+        seqstr_write(&in->status, status);
+        snprintf(status, sizeof(status), "load failed: %s (%s)", error, path);
+        log_line(status);
+        return -1;
+    }
     if (next->missing_zones)
         snprintf(status, sizeof(status), "%s: %u/%u zones, %u files missing", name,
                  next->zone_count - next->missing_zones, next->zone_count, next->missing_files);
     else
         snprintf(status, sizeof(status), "%s: %u zones", name, next->zone_count);
-    retire(in, atomic_exchange(&in->active, next));
-    set_status(in, status, NULL);
-    pthread_mutex_lock(&in->lock);
-    snprintf(in->loaded_path, sizeof(in->loaded_path), "%s", request);
-    pthread_mutex_unlock(&in->lock);
-    log_line("dspreset: loaded %s%s", status, "");
+    retire_engine(in, atomic_exchange(&in->active, next));
+    atomic_fetch_add(&in->load_count, 1);
+    seqstr_write(&in->loaded_path, path);
+    seqstr_write(&in->status, status);
+    { char line[600]; snprintf(line, sizeof(line), "loaded %s", status); log_line(line); }
+    return 0;
+}
+
+/* A path from the host (restored state, or a direct pick). Inside the catalog
+ * it becomes a bank/preset selection; outside, a direct file. Either way it
+ * loads at once — a restore is not somebody scrolling. */
+static void take_request(dspreset_instance_t *in, uint32_t *settled_gen) {
+    char path[1024];
+    int bank, preset;
+    ds_catalog_t *c;
+    seqstr_read(&in->request, path, sizeof(path));
+    if (!path[0]) return;
+    c = atomic_load(&in->catalog);
+    if (!c || ds_catalog_find(c, path, &bank, &preset)) {
+        /* An unpacked preset under a .dslibrary's folder may be newer than the scan. */
+        rescan(in);
+        c = atomic_load(&in->catalog);
+    }
+    if (c && !ds_catalog_find(c, path, &bank, &preset)) {
+        select_bank_preset(in, bank, preset);
+    } else {
+        /* A .dslibrary from elsewhere: unpack beside it, play its first preset. */
+        size_t len = strlen(path);
+        snprintf(in->direct_path, sizeof(in->direct_path), "%s", path);
+        if (len > 10 && !strcasecmp(path + len - 10, ".dslibrary")) {
+            char unpacked[1100];
+            struct stat st;
+            snprintf(unpacked, sizeof(unpacked), "%s.unpacked", path);
+            if (stat(unpacked, &st) && unpack_bank(in, path, FILE_BANK)) return;
+            if (ds_catalog_first_preset(unpacked, in->direct_path, sizeof(in->direct_path))) {
+                seqstr_write(&in->status, "Error: DSLibrary has no DSPreset");
+                return;
+            }
+        }
+        select_bank_preset(in, FILE_BANK, 0);
+    }
+    *settled_gen = atomic_load(&in->sel_gen);   /* skip the settle delay */
 }
 
 static void *engine_worker(void *opaque) {
     dspreset_instance_t *in = opaque;
+    uint32_t seen_gen = UINT32_MAX, seen_request = 0, settled_gen = UINT32_MAX, failed_gen = UINT32_MAX;
+    uint64_t changed_at = 0, scanned_at = 0, started_at;
+    int first_pick_done = 0;
+    rescan(in);
+    scanned_at = started_at = now_ms();
     while (atomic_load(&in->worker_running)) {
-        char request[1024] = {0};
+        uint32_t gen = atomic_load(&in->sel_gen), request = atomic_load(&in->request_gen);
         ds_native_engine_t *engine;
-        pthread_mutex_lock(&in->lock);
-        if (in->requested_path[0]) {
-            snprintf(request, sizeof(request), "%s", in->requested_path);
-            in->requested_path[0] = '\0';
+        uint64_t t = now_ms();
+        if (request != seen_request) { seen_request = request; first_pick_done = 1; take_request(in, &settled_gen); gen = atomic_load(&in->sel_gen); }
+        if (!first_pick_done && t - started_at >= FIRST_PICK_MS) {
+            /* Nothing restored: start on the first bank that can play now —
+             * never one that would have to be unpacked first. */
+            ds_catalog_t *c = atomic_load(&in->catalog);
+            first_pick_done = 1;
+            for (unsigned i = 0; c && i < c->bank_count; ++i)
+                if (c->banks[i].preset_count && atomic_load(&in->sel_bank) == NO_BANK) { select_bank_preset(in, (int)i, 0); break; }
+            gen = atomic_load(&in->sel_gen);
         }
-        pthread_mutex_unlock(&in->lock);
-        if (request[0]) {
-            atomic_store(&in->loading, 1);
-            load_request(in, request);
-            atomic_store(&in->loading, 0);
+        if (gen != seen_gen) { seen_gen = gen; changed_at = t; }
+        if (t - changed_at >= SETTLE_MS) settled_gen = gen;
+        if (settled_gen == gen && failed_gen != gen) {
+            char target[1100], loaded[1024];
+            int needs_unpack;
+            selected_target(in, target, sizeof(target), &needs_unpack);
+            seqstr_read(&in->loaded_path, loaded, sizeof(loaded));
+            if (needs_unpack) {
+                if (unpack_bank(in, target, atomic_load(&in->sel_bank))) failed_gen = gen;
+                continue;                          /* now its presets are known */
+            }
+            if (target[0] && strcmp(target, loaded)) {
+                int rc = load_target(in, target, gen);
+                if (rc && rc != DS_LOAD_CANCELLED) failed_gen = gen;
+                continue;
+            }
         }
+        if (t - scanned_at >= RESCAN_MS) { rescan(in); scanned_at = t; }
         engine = atomic_load(&in->active);
         if (!engine || !ds_native_engine_service(engine)) usleep(1000);
     }
     return NULL;
 }
 
+/* ---- plugin API --------------------------------------------------------- */
+
 static void *create_instance(const char *module_dir, const char *json_defaults) {
     dspreset_instance_t *in = calloc(1, sizeof(*in));
     (void)json_defaults;
     if (!in) return NULL;
-    in->gain = 0.7f;
-    snprintf(in->module_dir, sizeof(in->module_dir), "%s", module_dir ? module_dir : "");
-    snprintf(in->status, sizeof(in->status), "%s", "No preset");
+    atomic_store(&in->gain, 0.7f);
+    atomic_store(&in->unpacking_bank, -1);
+    atomic_store(&in->sel_bank, NO_BANK);
+    snprintf(in->module_dir, sizeof(in->module_dir), "%s", module_dir ? module_dir : ".");
+    snprintf(in->instruments, sizeof(in->instruments), "%s/instruments", in->module_dir);
+    mkdir(in->instruments, 0777);
+    seqstr_write(&in->status, "No preset");
     atomic_store(&in->worker_running, 1);
-    pthread_mutex_init(&in->lock, NULL);
-    if (pthread_create(&in->worker, NULL, engine_worker, in)) {
-        pthread_mutex_destroy(&in->lock); free(in); return NULL;
-    }
+    if (pthread_create(&in->worker, NULL, engine_worker, in)) { free(in); return NULL; }
     return in;
 }
 
 static void destroy_instance(void *opaque) {
     dspreset_instance_t *in = opaque;
+    retired_t *node;
     if (!in) return;
     atomic_store(&in->worker_running, 0);
     pthread_join(in->worker, NULL);
-    retire(in, atomic_exchange(&in->active, NULL));
-    pthread_mutex_destroy(&in->lock);
+    retire_engine(in, atomic_exchange(&in->active, NULL));
+    ds_catalog_free(atomic_load(&in->catalog));
+    while ((node = in->retired) != NULL) { in->retired = node->next; ds_catalog_free(node->catalog); free(node); }
     free(in);
 }
 
@@ -206,78 +334,160 @@ static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
     atomic_fetch_sub(&in->audio_users, 1);
 }
 
+static void request_path(dspreset_instance_t *in, const char *path) {
+    seqstr_write(&in->request, path);
+    atomic_fetch_add(&in->request_gen, 1);
+}
+
+/* Pulls one string field out of a flat JSON object; handles \" and \\. */
+static int json_string(const char *json, const char *key, char *out, size_t n) {
+    char pattern[64];
+    const char *p;
+    size_t k = 0;
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (!(p = strstr(json, pattern))) return 0;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') ++p;
+    if (*p != '"') return 0;
+    for (++p; *p && *p != '"' && k + 1 < n; ++p) {
+        if (*p == '\\' && p[1]) ++p;
+        out[k++] = *p;
+    }
+    out[k] = '\0';
+    return 1;
+}
+
 static void set_param(void *opaque, const char *key, const char *value) {
     dspreset_instance_t *in = opaque;
+    ds_catalog_t *c;
     if (!in || !key || !value) return;
-    if (!strcmp(key, "preset_path")) {
-        pthread_mutex_lock(&in->lock);
-        /* A re-sent path that already loaded is not reloaded; a failed one is retried. */
-        snprintf(in->preset_path, sizeof(in->preset_path), "%s", value);
-        if (value[0] && strcmp(value, in->loaded_path))
-            snprintf(in->requested_path, sizeof(in->requested_path), "%s", value);
-        pthread_mutex_unlock(&in->lock);
+    c = atomic_load(&in->catalog);
+    if (!strcmp(key, "bank")) {
+        int bank = atoi(value);
+        if (!c || bank < 0 || bank >= (int)c->bank_count) return;
+        if (bank != atomic_load(&in->sel_bank)) select_bank_preset(in, bank, 0);
+    } else if (!strcmp(key, "preset")) {
+        int bank = atomic_load(&in->sel_bank), preset = atoi(value);
+        if (!c || bank < 0 || bank >= (int)c->bank_count) return;
+        if (preset < 0 || preset >= (int)c->banks[bank].preset_count) return;
+        if (preset != atomic_load(&in->sel_preset)) select_bank_preset(in, bank, preset);
+    } else if (!strcmp(key, "preset_path")) {
+        request_path(in, value);
+    } else if (!strcmp(key, "state")) {
+        char path[1024], gain[32];
+        if (json_string(value, "gain", gain, sizeof(gain))) atomic_store(&in->gain, strtof(gain, NULL));
+        if (json_string(value, "preset_path", path, sizeof(path)) && path[0]) request_path(in, path);
     } else if (!strcmp(key, "gain")) {
-        in->gain = strtof(value, NULL);
+        atomic_store(&in->gain, strtof(value, NULL));
     }
 }
 
-static int locked_string(dspreset_instance_t *in, const char *text, char *out, int out_len) {
-    int n;
-    pthread_mutex_lock(&in->lock);
-    n = snprintf(out, (size_t)out_len, "%s", text);
-    pthread_mutex_unlock(&in->lock);
-    return n < out_len ? n : out_len - 1;
+/* Appends `text` to out as JSON string content. */
+static int json_escape(char *out, int n, const char *text) {
+    int k = 0;
+    for (; *text && k < n - 2; ++text) {
+        if (*text == '"' || *text == '\\') out[k++] = '\\';
+        out[k++] = (unsigned char)*text < 0x20 ? ' ' : *text;
+    }
+    out[k] = '\0';
+    return k;
 }
+
+static int finish(int n, int out_len) { return n < 0 ? -1 : n < out_len ? n : out_len - 1; }
+
+static const char *UI_HIERARCHY =
+    "{\"levels\":{"
+    "\"root\":{\"name\":\"DSPreset\",\"list_param\":\"preset\",\"count_param\":\"preset_count\","
+    "\"name_param\":\"preset_name\","
+    "\"params\":[{\"level\":\"banks\",\"label\":\"Banks\"},{\"key\":\"gain\",\"name\":\"Gain\"}],"
+    "\"knobs\":[\"gain\"]},"
+    "\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\",\"items_param\":\"bank_list\","
+    "\"select_param\":\"bank\",\"navigate_to\":\"root\"}}}";
 
 static int get_param(void *opaque, const char *key, char *out, int out_len) {
     dspreset_instance_t *in = opaque;
-    int n;
+    ds_catalog_t *c;
+    int bank, preset;
+    const ds_bank_t *b;
     if (!in || !key || !out || out_len <= 0) return -1;
-    if (!strcmp(key, "ui_hierarchy")) {
-        n = snprintf(out, (size_t)out_len,
-            "{\"levels\":{\"root\":{\"name\":\"DSPreset\","
-            "\"params\":[{\"key\":\"preset_path\",\"name\":\"Library\"},"
-            "{\"key\":\"gain\",\"name\":\"Gain\"}],\"knobs\":[\"gain\"]}}}");
-    } else if (!strcmp(key, "chain_params")) {
-        n = snprintf(out, (size_t)out_len,
-            "[{\"key\":\"preset_path\",\"name\":\"Library\",\"type\":\"filepath\","
-            "\"root\":\"/data/UserData\",\"start_path\":\"%s/instruments\","
-            "\"filter\":[\".dspreset\",\".dslibrary\"],\"default\":\"\"},"
-            "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\","
-            "\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}]", in->module_dir);
-    } else if (!strcmp(key, "preset_path")) {
-        return locked_string(in, in->preset_path, out, out_len);
-    } else if (!strcmp(key, "status")) {
-        return locked_string(in, in->status, out, out_len);
-    } else if (!strcmp(key, "gain")) {
-        n = snprintf(out, (size_t)out_len, "%.3f", in->gain);
-    } else if (!strcmp(key, "loading")) {
-        n = snprintf(out, (size_t)out_len, "%d", atomic_load(&in->loading));
-    } else if (!strcmp(key, "underruns") || !strcmp(key, "voices")) {
+    c = atomic_load(&in->catalog);
+    bank = atomic_load(&in->sel_bank);
+    preset = atomic_load(&in->sel_preset);
+    b = (c && bank >= 0 && bank < (int)c->bank_count) ? &c->banks[bank] : NULL;
+
+    if (!strcmp(key, "ui_hierarchy")) return finish(snprintf(out, (size_t)out_len, "%s", UI_HIERARCHY), out_len);
+    if (!strcmp(key, "chain_params")) {
+        unsigned banks = c ? c->bank_count : 0, presets = b ? b->preset_count : 0;
+        return finish(snprintf(out, (size_t)out_len,
+            "[{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":%u},"
+            "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
+            "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}]",
+            presets ? presets - 1 : 0, banks ? banks - 1 : 0), out_len);
+    }
+    if (!strcmp(key, "bank_list")) {
+        int k = snprintf(out, (size_t)out_len, "[");
+        for (unsigned i = 0; c && i < c->bank_count; ++i) {
+            char label[300];
+            int need;
+            json_escape(label, sizeof(label), c->banks[i].name);
+            need = snprintf(NULL, 0, "%s{\"label\":\"%s\",\"index\":%u}", i ? "," : "", label, i);
+            if (k + need + 2 >= out_len) break;           /* keep the JSON whole */
+            k += snprintf(out + k, (size_t)(out_len - k), "%s{\"label\":\"%s\",\"index\":%u}", i ? "," : "", label, i);
+        }
+        return finish(k + snprintf(out + k, (size_t)(out_len - k), "]"), out_len);
+    }
+    if (!strcmp(key, "bank")) return finish(snprintf(out, (size_t)out_len, "%d", bank < 0 ? 0 : bank), out_len);
+    if (!strcmp(key, "bank_count")) return finish(snprintf(out, (size_t)out_len, "%u", c ? c->bank_count : 0), out_len);
+    if (!strcmp(key, "bank_name")) return finish(snprintf(out, (size_t)out_len, "%s", b ? b->name : bank == FILE_BANK ? "File" : ""), out_len);
+    if (!strcmp(key, "preset")) return finish(snprintf(out, (size_t)out_len, "%d", preset), out_len);
+    if (!strcmp(key, "preset_count")) return finish(snprintf(out, (size_t)out_len, "%u", b ? b->preset_count : bank == FILE_BANK ? 1 : 0), out_len);
+    if (!strcmp(key, "preset_name")) {
+        const char *name;
+        char path[1024];
+        if (b && preset >= 0 && preset < (int)b->preset_count) name = b->preset_names[preset];
+        else if (b && atomic_load(&in->unpacking_bank) == bank) name = "Unpacking...";
+        else if (b && b->kind == DS_BANK_DSLIBRARY && !b->prepared) name = "Not unpacked";
+        else if (bank == FILE_BANK) { seqstr_read(&in->loaded_path, path, sizeof(path)); name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path; }
+        else if (bank == NO_BANK) name = c && c->bank_count ? "Choose a bank" : "No libraries";
+        else name = "No presets";
+        return finish(snprintf(out, (size_t)out_len, "%s", name), out_len);
+    }
+    if (!strcmp(key, "preset_path")) { seqstr_read(&in->loaded_path, out, (size_t)out_len); return (int)strlen(out); }
+    if (!strcmp(key, "status")) { seqstr_read(&in->status, out, (size_t)out_len); return (int)strlen(out); }
+    if (!strcmp(key, "state")) {
+        char path[1024], escaped[1100];
+        seqstr_read(&in->loaded_path, path, sizeof(path));
+        json_escape(escaped, sizeof(escaped), path);
+        return finish(snprintf(out, (size_t)out_len, "{\"preset_path\":\"%s\",\"gain\":\"%.3f\"}",
+                               escaped, (double)atomic_load(&in->gain)), out_len);
+    }
+    if (!strcmp(key, "gain")) return finish(snprintf(out, (size_t)out_len, "%.3f", (double)atomic_load(&in->gain)), out_len);
+    if (!strcmp(key, "loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->loading)), out_len);
+    if (!strcmp(key, "load_count")) return finish(snprintf(out, (size_t)out_len, "%u", atomic_load(&in->load_count)), out_len);
+    if (!strcmp(key, "underruns") || !strcmp(key, "voices")) {
         ds_native_engine_t *engine;
         unsigned value = 0;
         atomic_fetch_add(&in->audio_users, 1);
         engine = atomic_load(&in->active);
-        if (engine) value = !strcmp(key, "voices") ? ds_native_engine_active_voices(engine)
-                                                   : atomic_load(&engine->underruns);
+        if (engine) value = !strcmp(key, "voices") ? ds_native_engine_active_voices(engine) : atomic_load(&engine->underruns);
         atomic_fetch_sub(&in->audio_users, 1);
-        n = snprintf(out, (size_t)out_len, "%u", value);
-    } else {
-        return -1;
+        return finish(snprintf(out, (size_t)out_len, "%u", value), out_len);
     }
-    return n < out_len ? n : out_len - 1;
+    return -1;
 }
 
 static int get_error(void *opaque, char *out, int out_len) {
     dspreset_instance_t *in = opaque;
+    char status[1024];
     if (!in || !out || out_len <= 0) return -1;
-    return locked_string(in, in->error, out, out_len);
+    seqstr_read(&in->status, status, sizeof(status));
+    return finish(snprintf(out, (size_t)out_len, "%s", strncmp(status, "Error: ", 7) ? "" : status + 7), out_len);
 }
 
 static void render_block(void *opaque, int16_t *out, int frames) {
     dspreset_instance_t *in = opaque;
     ds_native_engine_t *engine;
-    float buffer[2 * 256];
+    float buffer[2 * 256], gain;
     if (!in || !out || frames <= 0) return;
     if (frames > 256) frames = 256;
     memset(buffer, 0, (size_t)frames * 2 * sizeof(float));
@@ -285,8 +495,9 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     engine = atomic_load(&in->active);
     if (engine) ds_native_engine_render(engine, buffer, (unsigned)frames);
     atomic_fetch_sub(&in->audio_users, 1);
+    gain = atomic_load(&in->gain);
     for (int i = 0; i < frames * 2; ++i) {
-        float x = buffer[i] * in->gain;
+        float x = buffer[i] * gain;
         if (x > 1) x = 1;
         if (x < -1) x = -1;
         out[i] = (int16_t)(x * 32767);

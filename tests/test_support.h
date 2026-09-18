@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); exit(1); } } while (0)
 
@@ -74,12 +75,21 @@ typedef struct {
     struct timespec next;               /* real-time pacing deadline */
 } plugin_t;
 
-static void plugin_open(plugin_t *p) {
+/* `module_dir` holds instruments/ — the catalog the Banks list is built from. */
+static void plugin_open_in(plugin_t *p, const char *module_dir) {
+    CHECK(module_dir);
     p->api = move_plugin_init_v2(&g_test_host);
     CHECK(p->api && p->api->api_version == 2);
-    p->instance = p->api->create_instance("/tmp/dspreset-module", "{}");
+    p->instance = p->api->create_instance(module_dir, "{}");
     CHECK(p->instance);
     clock_gettime(CLOCK_MONOTONIC, &p->next);
+}
+
+static void plugin_open(plugin_t *p) {
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/empty-module", getenv("TEST_TMP") ? getenv("TEST_TMP") : "/tmp");
+    mkdir(dir, 0777);
+    plugin_open_in(p, dir);
 }
 
 static void plugin_close(plugin_t *p) { p->api->destroy_instance(p->instance); }
@@ -93,15 +103,18 @@ static unsigned plugin_uint(plugin_t *p, const char *key) {
     char v[64]; plugin_get(p, key, v, sizeof(v)); return (unsigned)strtoul(v, NULL, 10);
 }
 
-/* Sets the path and waits for the worker to finish; returns the status line. */
+/* Sets the path and waits until THIS request has been handled: an engine was
+ * built (load_count rose) or the status turned to an error. Waiting only for
+ * "not Loading" returned while the PREVIOUS preset's status still stood, and
+ * the swap then landed under a sounding note. */
 static const char *plugin_load(plugin_t *p, const char *path, char *status, int n) {
-    char loading[16];
+    unsigned before = plugin_uint(p, "load_count");
     p->api->set_param(p->instance, "preset_path", path);
     for (int i = 0; i < 6000; ++i) {                 /* 60 s */
         usleep(10000);
-        plugin_get(p, "loading", loading, sizeof(loading));
         plugin_get(p, "status", status, n);
-        if (strcmp(loading, "1") && strncmp(status, "Loading", 7) && strcmp(status, "No preset")) break;
+        if (plugin_uint(p, "load_count") != before && !plugin_uint(p, "loading")) break;
+        if (!strncmp(status, "Error", 5) && !plugin_uint(p, "loading")) break;
     }
     clock_gettime(CLOCK_MONOTONIC, &p->next);        /* pace from now, not from before the load */
     return status;

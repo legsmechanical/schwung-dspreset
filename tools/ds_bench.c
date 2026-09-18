@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     float out[256];
     int voices = argc > 2 ? atoi(argv[2]) : 16;
     double total = 0, worst = 0, first_worst = 0;
-    if (argc < 2 || ds_native_engine_load(&e, argv[1], 44100, error, sizeof(error))) { fprintf(stderr, "load: %s\n", error); return 1; }
+    if (argc < 2 || ds_native_engine_load(&e, argv[1], 44100, NULL, NULL, error, sizeof(error))) { fprintf(stderr, "load: %s\n", error); return 1; }
     for (int v = 0; v < voices; ++v) ds_native_engine_note_on(&e, 36 + v % 40, 100);
     for (int b = 0; b < 2000; ++b) {
         double t0;

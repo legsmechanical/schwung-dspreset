@@ -21,6 +21,14 @@ done
 
 SOURCES=$(cat scripts/dsp_sources.txt)
 CFLAGS="-std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Isrc/dsp"
+# AddressSanitizer + UBSan on by default: an out-of-bounds read that happens to
+# land in mapped memory passes silently otherwise (it did, on macOS, while the
+# same test crashed on Linux). DSPRESET_NO_SANITIZE=1 is the named way out.
+if [ "${DSPRESET_NO_SANITIZE:-}" != 1 ]; then
+    CFLAGS="$CFLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+else
+    echo "NOTE: sanitizers OFF (DSPRESET_NO_SANITIZE=1)"
+fi
 if ! $CC $CFLAGS -c $SOURCES 2>"$BUILD/warnings.txt"; then cat "$BUILD/warnings.txt"; echo "FAIL: engine does not compile"; exit 1; fi
 mv ./*.o "$BUILD/"
 if [ -s "$BUILD/warnings.txt" ]; then cat "$BUILD/warnings.txt"; echo "FAIL: engine compiles with warnings"; exit 1; fi
@@ -64,6 +72,6 @@ for t in $tests; do
 done
 
 echo
-echo "tests: $pass passed, $fail failed, ${#skipped[@]} skipped"
+echo "tests: $pass passed, $fail failed, ${#skipped[@]} skipped${DSPRESET_NO_SANITIZE:+ (sanitizers OFF)}"
 for s in "${skipped[@]+"${skipped[@]}"}"; do echo "  SKIPPED: $s"; done
 [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
