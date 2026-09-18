@@ -24,7 +24,8 @@ FROM debian:bullseye-slim
 # glibc 2.31 -> 2.36 and GLIBCXX past what Move's runtime provides, so "fix
 # the build by bumping the base" yields a module that loads nowhere.
 ENV DEBIAN_SNAPSHOT=20260825T000000Z
-RUN printf 'deb http://snapshot.debian.org/archive/debian/%s bullseye main\n\
+RUN dpkg --add-architecture arm64 \
+    && printf 'deb http://snapshot.debian.org/archive/debian/%s bullseye main\n\
 deb http://snapshot.debian.org/archive/debian-security/%s bullseye-security main\n' \
         "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
@@ -32,6 +33,7 @@ deb http://snapshot.debian.org/archive/debian-security/%s bullseye-security main
     build-essential \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
+    zlib1g-dev:arm64 \
     cmake \
     git \
     pkg-config \

@@ -81,7 +81,7 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     build/dspreset_to_xsynth_sfz.o \
     "$XSHIM_A" \
     -o build/dsp.so \
-    -lm -lpthread -ldl -lrt
+    -lm -lpthread -ldl -lrt -lz
 
 echo "DSP plugin linked"
 
