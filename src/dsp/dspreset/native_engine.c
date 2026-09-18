@@ -235,7 +235,9 @@ static int zone_matches(const ds_zone_t *z, int note, int velocity, int trigger)
 }
 
 static void trigger_zones(ds_native_engine_t *e, int note, int velocity, int trigger) {
-    uint32_t counter = e->rr_counter[note]++, random;
+    /* Only a note-on advances round robin: the note-off's release-trigger pass
+     * must not, or every hit steps by two and half the recordings never play. */
+    uint32_t counter = trigger == DS_TRIGGER_ATTACK ? e->rr_counter[note]++ : e->rr_counter[note] - 1, random;
     e->rng = e->rng * 1664525u + 1013904223u;
     random = e->rng >> 8;
     memset(e->group_len, 0, e->group_count);
