@@ -28,6 +28,9 @@ typedef struct { float z1[2], z2[2]; } ds_fx_state_t;
 void ds_fx_prepare(ds_fx_coeffs_t *out, const ds_effect_t *fx, float sample_rate);
 /* In place on interleaved stereo. Audio thread: no allocation, no locks. */
 void ds_fx_process(const ds_fx_coeffs_t *c, ds_fx_state_t *state, float *lr, unsigned frames);
+/* The same on the LEFT channel only. Every effect here is linear and per
+ * channel, so a mono note can be filtered once and panned afterwards. */
+void ds_fx_process_left(const ds_fx_coeffs_t *c, ds_fx_state_t *state, float *lr, unsigned frames);
 float ds_fx_param(const ds_effect_t *fx, const char *name, float fallback);
 
 #endif

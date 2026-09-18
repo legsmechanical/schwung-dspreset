@@ -64,20 +64,20 @@ void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
     c->kind = DS_FX_BIQUAD;
 }
 
-void ds_fx_process(const ds_fx_coeffs_t *c, ds_fx_state_t *s, float *lr, unsigned frames) {
+static void process_channels(const ds_fx_coeffs_t *c, ds_fx_state_t *s, float *lr, unsigned frames, unsigned channels) {
     switch (c->kind) {
     case DS_FX_GAIN:
-        for (unsigned i = 0; i < frames * 2; ++i) lr[i] *= c->gain;
+        for (unsigned i = 0; i < frames; ++i) for (unsigned ch = 0; ch < channels; ++ch) lr[2 * i + ch] *= c->gain;
         break;
     case DS_FX_ONEPOLE:
-        for (unsigned ch = 0; ch < 2; ++ch) {
+        for (unsigned ch = 0; ch < channels; ++ch) {
             float y = s->z1[ch];
             for (unsigned i = 0; i < frames; ++i) { y = lr[2 * i + ch] + c->pole * (y - lr[2 * i + ch]); lr[2 * i + ch] = y; }
             s->z1[ch] = fabsf(y) < 1e-20f ? 0 : y;           /* no denormals in the tail */
         }
         break;
     case DS_FX_BIQUAD:
-        for (unsigned ch = 0; ch < 2; ++ch) {                /* transposed direct form II */
+        for (unsigned ch = 0; ch < channels; ++ch) {         /* transposed direct form II */
             float z1 = s->z1[ch], z2 = s->z2[ch];
             for (unsigned i = 0; i < frames; ++i) {
                 float x = lr[2 * i + ch], y = c->b0 * x + z1;
@@ -91,4 +91,12 @@ void ds_fx_process(const ds_fx_coeffs_t *c, ds_fx_state_t *s, float *lr, unsigne
         break;
     default: break;
     }
+}
+
+void ds_fx_process(const ds_fx_coeffs_t *c, ds_fx_state_t *s, float *lr, unsigned frames) {
+    process_channels(c, s, lr, frames, 2);
+}
+
+void ds_fx_process_left(const ds_fx_coeffs_t *c, ds_fx_state_t *s, float *lr, unsigned frames) {
+    process_channels(c, s, lr, frames, 1);
 }

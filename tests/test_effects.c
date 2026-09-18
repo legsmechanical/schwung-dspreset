@@ -118,6 +118,50 @@ int main(void) {
     near(note_rms(&e, 60), 0.5 * 0.7071, 0.005, "other group untouched");
     CHECK(note_rms(&e, 62) < 0.005);
     ds_native_engine_destroy(&e);
+
+    /* A mono note through a group filter is filtered ONCE and panned after:
+     * exact against the same note through the stereo path. The same mono tone
+     * duplicated into a stereo file is the control (identical samples, so any
+     * difference is the path). Pan +50 — the side that halves the LEFT, which
+     * is the channel the mono path filters: left = half of right. */
+    {
+        static ds_native_engine_t m, st;
+        float a[256], b[256];
+        char xml[1024];
+        snprintf(path, sizeof(path), "%s/fx/tone_st.wav", dir);
+        {   /* the same 5 kHz tone in both channels */
+            FILE *f = fopen(path, "wb");
+            uint32_t frames = 30000, data = frames * 6;
+            CHECK(f);
+            fwrite("RIFF", 1, 4, f); put32(f, 36 + data); fwrite("WAVEfmt ", 1, 8, f); put32(f, 16); put16(f, 1); put16(f, 2);
+            put32(f, 44100); put32(f, 44100 * 6); put16(f, 6); put16(f, 24); fwrite("data", 1, 4, f); put32(f, data);
+            for (uint32_t i = 0; i < frames; ++i) {
+                int32_t v = (int32_t)lrint(0.5 * sin(2 * M_PI * 5000 * i / 44100.0) * 8388607.0);
+                for (int c = 0; c < 2; ++c) { fputc(v & 255, f); fputc((v >> 8) & 255, f); fputc((v >> 16) & 255, f); }
+            }
+            fclose(f);
+        }
+        for (int stereo = 0; stereo < 2; ++stereo) {
+            snprintf(xml, sizeof(xml), "<DecentSampler><groups attack=\"0\"><group pan=\"50\"><sample path=\"%s\" rootNote=\"60\"/>"
+                     "<effects><effect type=\"lowpass\" frequency=\"3000\" resonance=\"2\"/></effects></group></groups></DecentSampler>",
+                     stereo ? "tone_st.wav" : "hi.wav");
+            snprintf(path, sizeof(path), "%s/fx/pan%d.dspreset", dir, stereo);
+            write_text(path, xml);
+            CHECK(ds_native_engine_load(stereo ? &st : &m, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
+            ds_native_engine_note_on(stereo ? &st : &m, 60, 127);
+        }
+        CHECK(m.voices[0].src->file.channels == 1 && st.voices[0].src->file.channels == 2);
+        for (int blk = 0; blk < 50; ++blk) {
+            memset(a, 0, sizeof(a)); memset(b, 0, sizeof(b));
+            ds_native_engine_render(&m, a, 128);
+            ds_native_engine_render(&st, b, 128);
+            for (int i = 0; i < 256; ++i) CHECK(fabsf(a[i] - b[i]) < 1e-6f);
+            for (int i = 0; i < 128; ++i) CHECK(fabsf(a[2 * i] - 0.5f * a[2 * i + 1]) < 1e-6f);
+        }
+        printf("  mono note, filtered once then panned: identical to the stereo path\n");
+        ds_native_engine_destroy(&m);
+        ds_native_engine_destroy(&st);
+    }
     puts("effects test passed");
     return 0;
 }

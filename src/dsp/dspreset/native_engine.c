@@ -458,9 +458,23 @@ static float effect_param_default(const ds_effect_t *fx, const char *name) {
     return 0;
 }
 
-/* Coefficients for effect `x` with the modulators applied. Only global
- * modulators reach an instrument effect (`with_voice` = 0). */
-static void modulated_effect(const ds_native_engine_t *e, unsigned x, const float *values, int with_voice, ds_fx_coeffs_t *out) {
+/* Has any setting moved since `built`? A relative change under 1e-4 does not
+ * count: the tail of an exponential decay would otherwise rebuild every block
+ * for an inaudible difference. */
+static int fx_settings_moved(const ds_effect_t *fx, const ds_fx_built_t *built) {
+    if (!built->valid || built->count != fx->param_count || built->enabled != fx->enabled) return 1;
+    for (unsigned i = 0; i < fx->param_count; ++i) {
+        float a = fx->param_values[i], b = built->values[i];
+        if (fabsf(a - b) > 1e-4f * (fabsf(a) > fabsf(b) ? fabsf(a) : fabsf(b))) return 1;
+    }
+    return 0;
+}
+
+/* Coefficients for effect `x` with the modulators applied, rebuilt only when a
+ * setting moved. Only global modulators reach an instrument effect
+ * (`with_voice` = 0). */
+static void modulated_effect(ds_native_engine_t *e, unsigned x, const float *values, int with_voice,
+                             ds_fx_coeffs_t *out, ds_fx_built_t *built) {
     ds_effect_t fx = e->model.effects[x];
     for (unsigned k = 0; k < e->model.modulator_count; ++k) {
         const ds_modulator_t *m = &e->model.modulators[k];
@@ -476,7 +490,13 @@ static void modulated_effect(const ds_native_engine_t *e, unsigned x, const floa
             set_effect_value(&fx, b->name, mod_apply(b->mod_behavior, ds_fx_param(&fx, name, effect_param_default(&fx, name)), t, n));
         }
     }
+    if (!fx_settings_moved(&fx, built)) return;
     ds_fx_prepare(out, &fx, (float)e->output_rate);
+    memcpy(built->values, fx.param_values, sizeof(built->values));
+    built->count = fx.param_count;
+    built->enabled = fx.enabled;
+    built->valid = 1;
+    e->fx_rebuilds++;
 }
 
 static ds_voice_t *allocate_voice(ds_native_engine_t *e) {
@@ -509,6 +529,7 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
         if (e->model.effects[x].group == d->group_index) {
             v->fx_index[v->fx_count] = (unsigned char)x;
             memset(&v->fx_state[v->fx_count], 0, sizeof(v->fx_state[0]));
+            v->fx_built[v->fx_count].valid = 0;                /* a new note builds its own */
             v->fx_count++;
         }
     for (unsigned k = 0; k < e->model.modulator_count; ++k)
@@ -735,19 +756,38 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
         } else {
             zone_now(e, v->zone, &now);
         }
-        if (!v->fx_count || frames > 256) {
+        const ds_fx_coeffs_t *chain[DS_VOICE_FX];
+        int filtering = 0;
+        for (unsigned k = 0; k < v->fx_count; ++k) {                  /* this block's coefficients first */
+            unsigned x = v->fx_index[k];
+            chain[k] = &e->fx_coeffs[x];
+            if (e->fx_modulated[x]) { modulated_effect(e, x, values, 1, &v->fx_live[k], &v->fx_built[k]); chain[k] = &v->fx_live[k]; }
+            filtering |= chain[k]->kind != DS_FX_BYPASS && chain[k]->kind != DS_FX_UNSUPPORTED;
+        }
+        if (!filtering || frames > 256) {
+            /* Nothing to run this block (a filter swept wide open): straight out.
+             * A filter's state is simply held, as a bypassed one would. */
             render_voice(e, v, out_lr, frames, &now);
         } else {
+            /* A MONO note is filtered once and panned after: the effects are
+             * linear and per channel, and a block's pan is constant, so this is
+             * exact — and halves the cost of the notes that dominate it. */
             float note[2 * 256];
+            int mono = v->src->file.channels == 1;
+            zone_now_t centred = now;
+            if (mono) centred.pan = 0;
             memset(note, 0, frames * 2 * sizeof(float));
-            render_voice(e, v, note, frames, &now);
+            render_voice(e, v, note, frames, &centred);
             for (unsigned k = 0; k < v->fx_count; ++k) {
-                unsigned x = v->fx_index[k];
-                const ds_fx_coeffs_t *c = &e->fx_coeffs[x];
-                if (e->fx_modulated[x]) { modulated_effect(e, x, values, 1, &v->fx_live[k]); c = &v->fx_live[k]; }
-                ds_fx_process(c, &v->fx_state[k], note, frames);
+                if (mono) ds_fx_process_left(chain[k], &v->fx_state[k], note, frames);
+                else ds_fx_process(chain[k], &v->fx_state[k], note, frames);
             }
-            for (unsigned k = 0; k < frames * 2; ++k) out_lr[k] += note[k];
+            if (mono) {
+                float pl = now.pan > 0 ? 1.0f - now.pan : 1.0f, pr = now.pan < 0 ? 1.0f + now.pan : 1.0f;
+                for (unsigned k = 0; k < frames; ++k) { out_lr[2 * k] += note[2 * k] * pl; out_lr[2 * k + 1] += note[2 * k] * pr; }
+            } else {
+                for (unsigned k = 0; k < frames * 2; ++k) out_lr[k] += note[k];
+            }
         }
         for (unsigned k = 0; k < e->model.modulator_count; ++k)
             if (e->model.modulators[k].voice_scope) mod_advance(&e->model.modulators[k], &v->mods[k], frames, (float)e->output_rate);
@@ -756,7 +796,7 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
     for (unsigned x = 0; x < e->model.effect_count; ++x) {
         const ds_fx_coeffs_t *c = &e->fx_coeffs[x];
         if (e->model.effects[x].group >= 0) continue;
-        if (e->fx_modulated[x]) { modulated_effect(e, x, e->mod_global_value, 0, &e->fx_live[x]); c = &e->fx_live[x]; }
+        if (e->fx_modulated[x]) { modulated_effect(e, x, e->mod_global_value, 0, &e->fx_live[x], &e->fx_live_built[x]); c = &e->fx_live[x]; }
         ds_fx_process(c, &e->fx_state[x], out_lr, frames);
     }
     if (underruns) atomic_fetch_add_explicit(&e->underruns, underruns, memory_order_relaxed);

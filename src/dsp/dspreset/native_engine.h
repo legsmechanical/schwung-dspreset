@@ -46,6 +46,11 @@ enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE 
  * once in the engine for global ones. Advanced once per block. */
 typedef struct { float phase, level, delay_left; int stage; } ds_mod_state_t;
 
+/* The effect settings a modulated effect's coefficients were last built from:
+ * rebuilt only when one of them has actually moved (a held envelope sits still,
+ * an LFO at zero depth never moves). */
+typedef struct { float values[DS_MAX_EFFECT_PARAMS]; unsigned count; int enabled, valid; } ds_fx_built_t;
+
 /* Stream word shared with the worker: generation (16) | zone+1 (16) | produced (32).
  * `produced` is the virtual frame (along the looped play path) the ring holds up
  * to; a zone of 0 means nothing to stream. */
@@ -70,6 +75,7 @@ typedef struct {
     unsigned char fx_index[DS_VOICE_FX];
     ds_fx_state_t fx_state[DS_VOICE_FX];
     ds_fx_coeffs_t fx_live[DS_VOICE_FX];    /* this note's coefficients when a modulator moves the effect */
+    ds_fx_built_t fx_built[DS_VOICE_FX];
     ds_mod_state_t mods[DS_MAX_MODULATORS];
 } ds_voice_t;
 
@@ -118,6 +124,8 @@ typedef struct {
     unsigned keys_held;
     unsigned char fx_modulated[DS_MAX_EFFECTS];
     ds_fx_coeffs_t fx_live[DS_MAX_EFFECTS];
+    ds_fx_built_t fx_live_built[DS_MAX_EFFECTS];
+    uint32_t fx_rebuilds;               /* coefficient rebuilds for modulation, for tests */
 } ds_native_engine_t;
 
 /* Loading is worker-only: parses XML, opens files, reads every resident head.
