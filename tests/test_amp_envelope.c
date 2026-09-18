@@ -79,6 +79,56 @@ int main(void) {
     CHECK(first < full * 0.9 && fabs(later - full) < 0.003);
     ds_native_engine_destroy(&e);
 
+    /* Polyphony counts NOTES, not layers: a limit of 2 on a preset that plays
+     * three layers per key holds six voices; a third key fades the oldest
+     * key's three out (5 ms). Released notes go first. 1 is mono. 0 = none. */
+    {
+        static ds_native_engine_t L;
+        snprintf(path, sizeof(path), "%s/amp/layers.dspreset", dir);
+        write_text(path, "<DecentSampler><groups attack=\"0\" release=\"2\">"
+                         "<group><sample path=\"instruments/Amp/tone.wav\" rootNote=\"60\"/></group>"
+                         "<group><sample path=\"instruments/Amp/tone.wav\" rootNote=\"60\"/></group>"
+                         "<group><sample path=\"instruments/Amp/tone.wav\" rootNote=\"60\"/></group></groups></DecentSampler>");
+        CHECK(ds_native_engine_load(&L, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
+        L.poly_limit = 2;
+        ds_native_engine_note_on(&L, 60, 100); ds_native_engine_note_on(&L, 62, 100);
+        blocks(&L, 2);
+        CHECK(ds_native_engine_active_voices(&L) == 6);
+        ds_native_engine_note_on(&L, 64, 100);
+        blocks(&L, 5);                                  /* 15 ms: the 5 ms fade is done */
+        CHECK(ds_native_engine_active_voices(&L) == 6);
+        for (int i = 0; i < DS_MAX_VOICES; ++i) if (L.voices[i].active) CHECK(L.voices[i].note != 60);
+        /* 64 (the NEWER) released, still ringing its 2 s release; 62 held: the
+         * RELEASED one goes, not the oldest */
+        ds_native_engine_note_off(&L, 64);
+        ds_native_engine_note_on(&L, 65, 100);
+        blocks(&L, 5);
+        for (int i = 0; i < DS_MAX_VOICES; ++i) if (L.voices[i].active) CHECK(L.voices[i].note == 62 || L.voices[i].note == 65);
+        /* among released notes, the OLDEST goes: 70 and 71 released, 72 held */
+        ds_native_engine_cc(&L, 120, 0);
+        L.poly_limit = 3;
+        ds_native_engine_note_on(&L, 70, 100); ds_native_engine_note_on(&L, 71, 100); ds_native_engine_note_on(&L, 72, 100);
+        ds_native_engine_note_off(&L, 70); ds_native_engine_note_off(&L, 71);
+        ds_native_engine_note_on(&L, 73, 100);
+        blocks(&L, 5);
+        for (int i = 0; i < DS_MAX_VOICES; ++i) if (L.voices[i].active) CHECK(L.voices[i].note != 70);
+        CHECK(ds_native_engine_active_voices(&L) == 9);
+        /* mono: each new key cuts the last */
+        ds_native_engine_cc(&L, 120, 0);
+        L.poly_limit = 1;
+        ds_native_engine_note_on(&L, 60, 100); blocks(&L, 2);
+        ds_native_engine_note_on(&L, 67, 100); blocks(&L, 5);
+        CHECK(ds_native_engine_active_voices(&L) == 3);
+        for (int i = 0; i < DS_MAX_VOICES; ++i) if (L.voices[i].active) CHECK(L.voices[i].note == 67);
+        /* "Preset": no limit of ours */
+        ds_native_engine_cc(&L, 120, 0);
+        L.poly_limit = 0;
+        for (int n = 40; n < 50; ++n) ds_native_engine_note_on(&L, n, 100);
+        blocks(&L, 5);
+        CHECK(ds_native_engine_active_voices(&L) == 30);
+        ds_native_engine_destroy(&L);
+    }
+
     /* Through the plugin: an Override switch then four NUMERIC knobs, adjacent
      * and named *_attack.._release (what both hosts draw as an envelope).
      * Off: the preset plays, and the knobs show ITS envelope. On: they replace it. */
@@ -96,7 +146,11 @@ int main(void) {
         CHECK(strstr(value, "{\"key\":\"amp_sustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"unit\":\"%\""));
         plugin_get(&p, "ui_hierarchy", value, sizeof(value));
         CHECK(strstr(value, "{\"level\":\"amp\",\"label\":\"Amp Envelope\"}"));
-        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"]"));
+        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"]"));
+        plugin_get(&p, "chain_params", value, sizeof(value));
+        CHECK(strstr(value, "{\"key\":\"polyphony\",\"name\":\"Polyphony\",\"type\":\"enum\",\"options\":[\"Preset\",\"1\",\"2\""));
+        CHECK(strstr(value, ",\"64\"],\"default\":0}"));
+        CHECK(plugin_uint(&p, "polyphony") == 0);
         /* Off by default, knobs mirroring the preset: release 0.05 s, sustain 100% */
         CHECK(plugin_uint(&p, "amp_override") == 0);
         plugin_get(&p, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "0.0500"));
@@ -134,12 +188,15 @@ int main(void) {
         }
         /* saved with the project, and restored: switch and values */
         plugin_get(&p, "state", state, sizeof(state));
-        CHECK(strstr(state, "\"amp\":\"1;0;0;1;5\""));
+        p.api->set_param(p.instance, "polyphony", "4");
+        plugin_get(&p, "state", state, sizeof(state));
+        CHECK(strstr(state, "\"amp\":\"1;0;0;1;5\",\"polyphony\":\"4\"}"));
         plugin_open_in(&q, mod);
         q.api->set_param(q.instance, "state", state);
         for (int i = 0; i < 300 && plugin_uint(&q, "load_count") == 0; ++i) usleep(10000);
         CHECK(plugin_uint(&q, "load_count") == 1);
         CHECK(plugin_uint(&q, "amp_override") == 1);        /* still on AFTER its preset loaded */
+        CHECK(plugin_uint(&q, "polyphony") == 4);
         plugin_get(&q, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "5.0000"));
         /* choosing ANOTHER preset turns Override off, and the knobs show the new
          * preset's envelope (p2: release 1.25 s) */
@@ -147,6 +204,7 @@ int main(void) {
         for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
         CHECK(plugin_uint(&p, "load_count") == 2);
         CHECK(plugin_uint(&p, "amp_override") == 0);
+        CHECK(plugin_uint(&p, "polyphony") == 4);            /* a playing setting: it stays */
         plugin_get(&p, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "1.2500"));
         p.api->set_param(p.instance, "preset", "0");
         for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }

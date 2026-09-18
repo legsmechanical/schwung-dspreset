@@ -23,7 +23,7 @@ source.
 
 - **An amp envelope for every preset** on its own page, drawn as an envelope: Attack, Decay,
   Sustain and Release, and an Override switch. Off, they show the preset's own envelope; on,
-  they replace it.
+  they replace it. Beside them, **Polyphony**: "Preset" or 1–64 notes (1 = mono).
 - **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
   with the preset's knobs setting their depth, rate and times.
 

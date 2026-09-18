@@ -70,6 +70,8 @@ typedef struct {
     uint32_t age, generation;
     uint32_t underruns;
     float vel;                          /* velocity 0..1, re-applied as settings move */
+    uint32_t note_id;                   /* which note-on started it: its layers share one */
+    int choked;                         /* stolen by the note limit: fading out, not counted */
     /* Its group's effects, fresh per note as in DecentSampler. */
     unsigned fx_count;
     unsigned char fx_index[DS_VOICE_FX];
@@ -128,6 +130,11 @@ typedef struct {
      * the preset's value for every zone that has an amp envelope. Written by the
      * audio thread only (the plugin copies it in before each MIDI call and block). */
     float amp_override[4];
+    /* The module's note limit: how many NOTES (keys, however many layers each
+     * plays) may sound at once; 0 = no limit beyond the voice pool. A new note
+     * over it fades the oldest out in 5 ms, released notes first. */
+    int poly_limit;
+    uint32_t note_counter;
     ds_fx_coeffs_t fx_live[DS_MAX_EFFECTS];
     ds_fx_built_t fx_live_built[DS_MAX_EFFECTS];
     uint32_t fx_rebuilds;               /* coefficient rebuilds for modulation, for tests */

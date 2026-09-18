@@ -539,6 +539,8 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
     v->zone = z; v->src = s;
     v->pos = (double)z->start;
     v->vel = velocity / 127.0f;
+    v->note_id = e->note_counter;
+    v->choked = 0;
     v->fx_count = 0;
     for (unsigned x = 0; x < e->model.effect_count && v->fx_count < DS_VOICE_FX; ++x)
         if (e->model.effects[x].group == d->group_index) {
@@ -600,6 +602,42 @@ static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int not
            velocity >= z->def.lo_vel && velocity <= z->def.hi_vel;
 }
 
+/* Fades every voice of note `id` out in 5 ms and stops counting it. */
+static void choke_note(ds_native_engine_t *e, uint32_t id) {
+    for (int i = 0; i < DS_MAX_VOICES; ++i) {
+        ds_voice_t *v = &e->voices[i];
+        if (!v->active || v->one_shot || v->note_id != id) continue;
+        if (v->env_stage == DS_ENV_ATTACK && v->env_level <= 0.0f) v->env_level = v->env_attack_step < 1.0f ? v->env_attack_step : 1.0f;
+        v->env_release_coef = coef_for(0.005f, e->output_rate);
+        v->env_stage = DS_ENV_RELEASE;
+        v->choked = 1;
+    }
+}
+
+/* Make room for one more note under the limit: while `limit` notes are
+ * already sounding, fade out the oldest — a released one if there is any. */
+static void enforce_note_limit(ds_native_engine_t *e) {
+    if (e->poly_limit <= 0) return;
+    for (;;) {
+        uint32_t ids[DS_MAX_VOICES];
+        int held[DS_MAX_VOICES], count = 0, victim = -1;
+        for (int i = 0; i < DS_MAX_VOICES; ++i) {
+            const ds_voice_t *v = &e->voices[i];
+            int k;
+            if (!v->active || v->one_shot || v->choked) continue;
+            for (k = 0; k < count && ids[k] != v->note_id; ++k) {}
+            if (k == count) { ids[count] = v->note_id; held[count] = 0; count++; }
+            if (v->key_down || v->sustained) held[k] = 1;
+        }
+        if (count < e->poly_limit) return;
+        for (int k = 0; k < count; ++k)                     /* oldest released note... */
+            if (!held[k] && (victim < 0 || ids[k] < ids[victim])) victim = k;
+        if (victim < 0)                                     /* ...else the oldest held one */
+            for (int k = 0; k < count; ++k) if (victim < 0 || ids[k] < ids[victim]) victim = k;
+        choke_note(e, ids[victim]);
+    }
+}
+
 static void trigger_zones(ds_native_engine_t *e, int note, int velocity, int trigger) {
     /* Only a note-on advances round robin: the note-off's release-trigger pass
      * must not, or every hit steps by two and half the recordings never play. */
@@ -631,6 +669,8 @@ void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
             if (!e->model.modulators[k].voice_scope && e->model.modulators[k].kind == DS_MOD_ENVELOPE)
                 mod_start(&e->model.modulators[k], &e->mod_global[k]);
     e->note_velocity[note] = velocity;
+    enforce_note_limit(e);
+    e->note_counter++;
     trigger_zones(e, note, velocity, DS_TRIGGER_ATTACK);
 }
 

@@ -92,6 +92,7 @@ typedef struct {
     _Atomic uint32_t load_count;        /* engines actually built, for tests */
     _Atomic float gain;
     _Atomic int amp_on;                 /* the module's amp envelope: Override */
+    _Atomic int polyphony;              /* notes at once; 0 = "Preset" (no module limit) */
     _Atomic float amp_value[4];         /* seconds, seconds, 0..1, seconds */
     seqstr_t request;                   /* preset_path / state from the host */
     seqstr_t request_controls;          /* control positions from a restored state */
@@ -396,6 +397,7 @@ static void destroy_instance(void *opaque) {
 /* The module's envelope into the engine: on the audio thread, the engine's only writer. */
 static void sync_amp(dspreset_instance_t *in, ds_native_engine_t *engine) {
     int on = atomic_load_explicit(&in->amp_on, memory_order_relaxed);
+    engine->poly_limit = atomic_load_explicit(&in->polyphony, memory_order_relaxed);
     for (int i = 0; i < 4; ++i)
         engine->amp_override[i] = on ? atomic_load_explicit(&in->amp_value[i], memory_order_relaxed) : -1.0f;
 }
@@ -458,6 +460,10 @@ static void set_param(void *opaque, const char *key, const char *value) {
         if (!c || bank < 0 || bank >= (int)c->bank_count) return;
         if (preset < 0 || preset >= (int)c->banks[bank].preset_count) return;
         if (preset != atomic_load(&in->sel_preset)) { atomic_store(&in->busy, 1); select_bank_preset(in, bank, preset); }
+    } else if (!strcmp(key, "polyphony")) {
+        /* an index into Preset, 1..64 — which is also the number itself */
+        int n = !strcasecmp(value, "Preset") ? 0 : atoi(value);
+        atomic_store(&in->polyphony, n < 0 ? 0 : n > DS_MAX_VOICES ? DS_MAX_VOICES : n);
     } else if (!strcmp(key, "amp_override")) {
         atomic_store(&in->amp_on, !strcmp(value, "1") || !strcasecmp(value, "On"));
     } else if (amp_stage_of(key) >= 0) {
@@ -478,6 +484,11 @@ static void set_param(void *opaque, const char *key, const char *value) {
         if (!json_string(value, "controls", controls, sizeof(controls))) controls[0] = '\0';
         {
             char amp[128];
+            char poly[16];
+            if (json_string(value, "polyphony", poly, sizeof(poly))) {
+                int n = atoi(poly);
+                atomic_store(&in->polyphony, n < 0 ? 0 : n > DS_MAX_VOICES ? DS_MAX_VOICES : n);
+            }
             if (json_string(value, "amp", amp, sizeof(amp))) {           /* "on;attack;decay;sustain;release" */
                 char *q = amp, *tail;
                 atomic_store(&in->amp_on, strtol(q, &tail, 10) != 0);
@@ -537,8 +548,8 @@ static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
     for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "\"ctl_%u\",", i);
     return append(out, k, n, "\"gain\"]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
                   "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"},"
-                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"],"
-                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"]}}}");
+                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"],"
+                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"]}}}");
 }
 
 static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsigned presets, char *out, int n) {
@@ -546,6 +557,9 @@ static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsig
                    "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
                    "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}",
                    presets ? presets - 1 : 0, banks ? banks - 1 : 0);
+    k = append(out, k, n, ",{\"key\":\"polyphony\",\"name\":\"Polyphony\",\"type\":\"enum\",\"options\":[\"Preset\"");
+    for (int v = 1; v <= DS_MAX_VOICES; ++v) k = append(out, k, n, ",\"%d\"", v);
+    k = append(out, k, n, "],\"default\":0}");
     k = append(out, k, n, ",{\"key\":\"amp_override\",\"name\":\"Override\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0}"
                    ",{\"key\":\"amp_attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":10,\"step\":0.001,\"unit\":\"sec\",\"default\":0,"
                    "\"viz\":{\"kind\":\"envelope\",\"group\":\"amp_env\",\"role\":\"attack\"}}"
@@ -606,9 +620,10 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
                        (double)atomic_load(&in->gain));
             for (unsigned i = 0; engine && i < engine->model.control_count; ++i)
                 k = append(out, k, out_len, "%s%g", i ? ";" : "", (double)engine->control_value[i]);
-            k = append(out, k, out_len, "\",\"amp\":\"%d;%g;%g;%g;%g\"}", atomic_load(&in->amp_on),
+            k = append(out, k, out_len, "\",\"amp\":\"%d;%g;%g;%g;%g\"", atomic_load(&in->amp_on),
                        (double)atomic_load(&in->amp_value[0]), (double)atomic_load(&in->amp_value[1]),
                        (double)atomic_load(&in->amp_value[2]), (double)atomic_load(&in->amp_value[3]));
+            k = append(out, k, out_len, ",\"polyphony\":\"%d\"}", atomic_load(&in->polyphony));
         } else {
             unsigned i = (unsigned)atoi(key + 4);
             if (engine && i < engine->model.control_count) {
@@ -620,6 +635,7 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
         atomic_fetch_sub(&in->audio_users, 1);
         return k;
     }
+    if (!strcmp(key, "polyphony")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->polyphony)), out_len);
     if (!strcmp(key, "amp_override")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->amp_on)), out_len);
     if (amp_stage_of(key) >= 0) return finish(snprintf(out, (size_t)out_len, "%.4f", (double)atomic_load(&in->amp_value[amp_stage_of(key)])), out_len);
     if (!strcmp(key, "is_loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->busy) ? 1 : 0), out_len);

@@ -26,4 +26,5 @@ const env = amp.groups.find((g) => g.kind === "envelope");
 if (!env) fail("Amp Envelope does not draw an envelope");
 if (env.keys.join(",") !== "amp_attack,amp_decay,amp_sustain,amp_release") fail("the envelope is not attack..release: " + env.keys);
 if (!amp.groups.some((g) => g.kind === "switch" && g.keys[0] === "amp_override")) fail("Override is not a switch");
+if (amp.keys.join(",") !== "amp_attack,amp_decay,amp_sustain,amp_release,amp_override,polyphony") fail("Amp Envelope knobs: " + amp.keys);
 console.log("pages test passed");

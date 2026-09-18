@@ -115,6 +115,12 @@ envelope ignore it. Copied into `engine->amp_override[]` on the audio thread bef
 call and block; a Sustain moved while a note is held glides there (≥ 20 ms). `state` saves
 `"amp":"on;a;d;s;r"`.
 
+**Polyphony** (knob 6, same page): an enum `Preset, 1..64` whose index IS the number. It counts
+NOTES — every layer a key plays is one note (`voice.note_id`) — not voices. Over the limit, a
+new note fades the oldest out in 5 ms (`choke_note`), released notes before held ones, oldest
+first within each. "Preset" = no limit of ours (DecentSampler has only per-TAG polyphony, not
+implemented yet). A playing setting: it survives a preset change. `state` saves `"polyphony"`.
+
 ## Modulators
 
 `<lfo>`, `<envelope>`, `<midiCC>`, `<midiVelocity>` in `preset_model.c`; run in
