@@ -166,6 +166,7 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     /* Controls start at the preset's values, and fire (DecentSampler's
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
+    for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         e->voices[i].ring = malloc((size_t)DS_RING_FRAMES * 2 * sizeof(float));
         if (!e->voices[i].ring) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
@@ -238,6 +239,7 @@ static void set_group_value(ds_group_settings_t *g, int target, float v) {
 static const char *effect_attribute(const char *token) {
     static const struct { const char *token, *attr; } map[] = {
         {"FX_FILTER_FREQUENCY", "frequency"}, {"FX_FILTER_RESONANCE", "resonance"}, {"FX_FILTER_GAIN", "gain"},
+        {"FX_FILTER_Q", "q"}, {"LEVEL", "level"},
         {"FX_CENTER_FREQUENCY", "frequency"}, {"FX_REVERB_WET_LEVEL", "wetLevel"}, {"FX_REVERB_ROOM_SIZE", "roomSize"},
         {"FX_REVERB_DAMPING", "damping"}, {"FX_DELAY_TIME", "delayTime"}, {"FX_FEEDBACK", "feedback"},
         {"FX_WET_LEVEL", "wetLevel"}, {"FX_MIX", "mix"}, {"FX_MOD_RATE", "modRate"}, {"FX_MOD_DEPTH", "modDepth"},
@@ -270,8 +272,10 @@ static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in
         return;
     case DS_TARGET_EFFECT:
         for (unsigned i = 0; i < e->model.effect_count; ++i)
-            if ((b->tag_mask && (e->model.effects[i].tag_mask & b->tag_mask)) || (!b->tag_mask && (int)i == (b->position < 0 ? 0 : b->position)))
+            if (b->tag_mask ? (e->model.effects[i].tag_mask & b->tag_mask) != 0 : (int)i == b->effect) {
                 set_effect_value(&e->model.effects[i], b->name, v);
+                e->fx_dirty[i] = 1;
+            }
         return;
     default: break;
     }
@@ -335,6 +339,13 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
     v->zone = z; v->src = s;
     v->pos = (double)z->start;
     v->vel = velocity / 127.0f;
+    v->fx_count = 0;
+    for (unsigned x = 0; x < e->model.effect_count && v->fx_count < DS_VOICE_FX; ++x)
+        if (e->model.effects[x].group == d->group_index) {
+            v->fx_index[v->fx_count] = (unsigned char)x;
+            memset(&v->fx_state[v->fx_count], 0, sizeof(v->fx_state[0]));
+            v->fx_count++;
+        }
     v->note = note; v->velocity = velocity;
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
     v->age = ++e->age_counter;
@@ -522,12 +533,25 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
 void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned frames) {
     uint32_t underruns = 0;
     if (!e || !out_lr) return;
+    for (unsigned x = 0; x < e->model.effect_count; ++x)
+        if (e->fx_dirty[x]) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)e->output_rate); e->fx_dirty[x] = 0; }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];
         if (!v->active) continue;
-        render_voice(e, v, out_lr, frames);
+        if (!v->fx_count || frames > 256) {
+            render_voice(e, v, out_lr, frames);
+        } else {
+            float note[2 * 256];
+            memset(note, 0, frames * 2 * sizeof(float));
+            render_voice(e, v, note, frames);
+            for (unsigned k = 0; k < v->fx_count; ++k)
+                ds_fx_process(&e->fx_coeffs[v->fx_index[k]], &v->fx_state[k], note, frames);
+            for (unsigned k = 0; k < frames * 2; ++k) out_lr[k] += note[k];
+        }
         underruns += v->underruns;
     }
+    for (unsigned x = 0; x < e->model.effect_count; ++x)
+        if (e->model.effects[x].group < 0) ds_fx_process(&e->fx_coeffs[x], &e->fx_state[x], out_lr, frames);
     if (underruns) atomic_fetch_add_explicit(&e->underruns, underruns, memory_order_relaxed);
     for (int i = 0; i < DS_MAX_VOICES; ++i) e->voices[i].underruns = 0;
 }

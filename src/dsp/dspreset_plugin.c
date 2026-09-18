@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -583,6 +584,16 @@ static int get_error(void *opaque, char *out, int out_len) {
     return finish(snprintf(out, (size_t)out_len, "%s", strncmp(status, "Error: ", 7) ? "" : status + 7), out_len);
 }
 
+/* Exact below 0.9 (-0.9 dBFS); above, it bends smoothly to a ceiling of 1.0
+ * instead of squaring off. A preset's EQ can add +10 dB (Capture's does, by
+ * default), and a hard clip there is the sound of something broken. */
+static inline float soft_clip(float x) {
+    float a = fabsf(x);
+    if (a <= 0.9f) return x;
+    a = 0.9f + 0.1f * tanhf((a - 0.9f) / 0.1f);
+    return x < 0 ? -a : a;
+}
+
 static void render_block(void *opaque, int16_t *out, int frames) {
     dspreset_instance_t *in = opaque;
     ds_native_engine_t *engine;
@@ -600,12 +611,7 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     }
     atomic_fetch_sub(&in->audio_users, 1);
     gain = atomic_load(&in->gain);
-    for (int i = 0; i < frames * 2; ++i) {
-        float x = buffer[i] * gain;
-        if (x > 1) x = 1;
-        if (x < -1) x = -1;
-        out[i] = (int16_t)(x * 32767);
-    }
+    for (int i = 0; i < frames * 2; ++i) out[i] = (int16_t)(soft_clip(buffer[i] * gain) * 32767);
 }
 
 static plugin_api_v2_t g_plugin_api_v2 = {

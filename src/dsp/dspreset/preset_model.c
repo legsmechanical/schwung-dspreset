@@ -13,7 +13,6 @@
 #define MAX_BINDINGS 2048
 #define MAX_CHOICES 512
 #define MAX_CCS 128
-#define MAX_EFFECTS 64
 #define MAX_GROUPS 4096
 
 static void fail(char *out, unsigned n, const char *message) { if (n) snprintf(out, n, "%s", message); }
@@ -131,6 +130,14 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     b->position = -1;
     if (attr_num(a, e, "position", &f) || attr_num(a, e, "groupIndex", &f) || attr_num(a, e, "effectIndex", &f) ||
         attr_num(a, e, "controlIndex", &f)) b->position = (int)f;
+    /* An effect is addressed as (group, effect within it): groupIndex or
+     * controlIndex name the group of a group-level effect, effectIndex or
+     * position the effect. Resolved to model.effects once all are parsed. */
+    b->effect = -1;
+    b->effect_group = -1;
+    b->effect_index = attr_num(a, e, "effectIndex", &f) ? (int)f : attr_num(a, e, "position", &f) ? (int)f : 0;
+    if (b->level == DS_LEVEL_GROUP && (attr_num(a, e, "groupIndex", &f) || attr_num(a, e, "controlIndex", &f)))
+        b->effect_group = (int)f;
     if (b->level == DS_LEVEL_TAG) {
         if (attr(a, e, "identifier", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text)))
             b->tag_mask = ds_preset_model_tag_mask(m, text);
@@ -232,8 +239,8 @@ static void name_control(ds_preset_model_t *m, ds_control_t *c, unsigned index) 
     } else if (b && b->level == DS_LEVEL_TAG && b->tag_mask) {
         for (unsigned t = 0; t < m->tag_count; ++t)
             if (b->tag_mask & (1ull << t)) { snprintf(c->name, sizeof(c->name), "%.31s", m->tag_names[t]); break; }
-    } else if (b && b->target == DS_TARGET_EFFECT && b->position >= 0 && b->position < (int)m->effect_count) {
-        const ds_effect_t *fx = &m->effects[b->position];
+    } else if (b && b->target == DS_TARGET_EFFECT && b->effect >= 0) {
+        const ds_effect_t *fx = &m->effects[b->effect];
         const char *label = alias(b->name), *prefix = effect_prefix(fx->type);
         float freq = 0;
         for (unsigned i = 0; i < fx->param_count; ++i) if (!strcmp(fx->param_names[i], "frequency")) freq = fx->param_values[i];
@@ -269,7 +276,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     m->choices = calloc(MAX_CHOICES, sizeof(ds_choice_t));
     m->bindings = calloc(MAX_BINDINGS, sizeof(ds_binding_t));
     m->ccs = calloc(MAX_CCS, sizeof(ds_cc_map_t));
-    m->effects = calloc(MAX_EFFECTS, sizeof(ds_effect_t));
+    m->effects = calloc(DS_MAX_EFFECTS, sizeof(ds_effect_t));
     if (!xml || !m->groups || !m->choices || !m->bindings || !m->ccs || !m->effects ||
         fread(xml, 1, (size_t)length, file) != (size_t)length) {
         fclose(file); free(xml); ds_preset_model_free(m);
@@ -308,7 +315,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             in_group = !self_closing;
             continue;
         }
-        if (in_effects && !closing && tag_is(tag, "effect") && m->effect_count < MAX_EFFECTS) {
+        if (in_effects && !closing && tag_is(tag, "effect") && m->effect_count < DS_MAX_EFFECTS) {
             ds_effect_t *fx = &m->effects[m->effect_count++];
             const char *q = a;
             char text[256];
@@ -316,6 +323,10 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             fx->group = in_group ? group : -1;
             fx->enabled = !(attr(a, end, "enabled", text, sizeof(text)) && !strcasecmp(text, "false"));
             if (attr(a, end, "tags", text, sizeof(text))) fx->tag_mask = ds_preset_model_tag_mask(m, text);
+            if (attr(a, end, "levelUnit", text, sizeof(text)) && !strcasecmp(text, "linear")) {
+                snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "levelLinear");
+                fx->param_values[fx->param_count++] = 1;
+            }
             while (q < end && fx->param_count < DS_MAX_EFFECT_PARAMS) {    /* every numeric attribute */
                 char key[24]; unsigned n = 0; float v;
                 while (q < end && !is_name_char(*q)) ++q;
@@ -325,7 +336,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 if (q >= end) break;
                 { char quote = *q++; while (q < end && *q != quote) ++q; ++q; }
                 if (n && strcmp(key, "type") && strcmp(key, "tags") && attr_num(a, end, key, &v)) {
-                    snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "%s", key);
+                    snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "%s", !strcmp(key, "Q") ? "q" : key);
                     fx->param_values[fx->param_count++] = v;
                 }
             }
@@ -388,6 +399,15 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
         }
     }
     free(xml);
+    for (unsigned i = 0; i < m->binding_count; ++i) {
+        ds_binding_t *b = &m->bindings[i];
+        int k = 0;
+        if (b->target != DS_TARGET_EFFECT || b->tag_mask) continue;
+        for (unsigned x = 0; x < m->effect_count; ++x) {
+            if (m->effects[x].group != b->effect_group) continue;
+            if (k++ == b->effect_index) { b->effect = (int)x; break; }
+        }
+    }
     for (unsigned i = 0; i < m->control_count; ++i) {
         ds_control_t *c = &m->controls[i];
         if (c->kind != DS_CONTROL_KNOB) { c->min = 0; c->max = c->choice_count ? (float)(c->choice_count - 1) : 0; c->integer = 1; }

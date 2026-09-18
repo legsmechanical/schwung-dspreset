@@ -56,6 +56,10 @@ static void capture(plugin_t *p, const char *preset) {
     ds_wav_source_close(&src);
     CHECK(frames > 16384 + 44100);                     /* the comparison crosses into the stream */
 
+    /* Its EQ is ON by default (every band boosted). Switch it off — the cutoff
+     * rests at 22 kHz, an exact pass-through — so the output must be the file. */
+    p->api->set_param(p->instance, "ctl_0", "1");
+    plugin_render(p, out);
     plugin_midi(p, 0x90, 35, 100);
     blocks = frames / BLOCK;
     for (unsigned b = 0; b < blocks; ++b) {
@@ -71,7 +75,24 @@ static void capture(plugin_t *p, const char *preset) {
         }
     }
     plugin_midi(p, 0x80, 35, 0);
-    printf("  Capture note 35: %u frames match the file (worst %u LSB)\n", blocks * BLOCK, worst);
+    printf("  Capture note 35, EQ off: %u frames match the file (worst %u LSB)\n", blocks * BLOCK, worst);
+    for (int i = 0; i < 100; ++i) plugin_render(p, out);
+    {   /* EQ back on: the same note must come out different, and louder */
+        double eq_on = 0, eq_off = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            p->api->set_param(p->instance, "ctl_0", pass ? "1" : "0");
+            plugin_render(p, out);
+            for (int hit = 0; hit < 4; ++hit) {         /* all four round robins, so both passes hear the same set */
+                plugin_midi(p, 0x90, 40, 100);
+                for (int b = 0; b < 60; ++b) { plugin_render(p, out); *(pass ? &eq_off : &eq_on) += rms(out, BLOCK * 2); }
+                plugin_midi(p, 0x80, 40, 0);
+                for (int b = 0; b < 60; ++b) plugin_render(p, out);
+            }
+        }
+        printf("  Capture EQ on vs off: %.4f vs %.4f\n", eq_on / 240, eq_off / 240);
+        CHECK(eq_on > eq_off * 1.2);
+        p->api->set_param(p->instance, "ctl_0", "1");
+    }
 
     /* round robin: the next three hits pick different files */
     for (int hit = 0; hit < 3; ++hit) {
@@ -149,6 +170,18 @@ static void asimov(plugin_t *p, const char *dir_path) {
             CHECK(slow / 40 < early / 40 / 10);
             p->api->set_param(p->instance, "ctl_4", "0");
             for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+            {   /* and its Cutoff knob, at the bottom of its table, darkens a held note */
+                double open = 0, shut = 0;
+                plugin_midi(p, 0x90, 60, 100);
+                for (int b = 0; b < 200; ++b) { plugin_render(p, out); if (b >= 100) open += rms(out, BLOCK * 2); }
+                p->api->set_param(p->instance, "ctl_0", "1");
+                for (int b = 0; b < 200; ++b) { plugin_render(p, out); if (b >= 100) shut += rms(out, BLOCK * 2); }
+                plugin_midi(p, 0x80, 60, 0);
+                printf("  Off World, Cutoff open vs shut: %.4f vs %.4f\n", open / 100, shut / 100);
+                CHECK(shut < open / 3);
+                p->api->set_param(p->instance, "ctl_0", "10");
+                for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+            }
         }
         for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
         free(names[k]);

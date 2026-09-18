@@ -61,7 +61,7 @@ jog-click picker's "DSPreset Presets" row.
   cross via seqlocks; the catalog is published whole and old ones live until destroy.
 - `preset_path` still loads any file directly (a bank of its own, "File").
 
-## Preset controls (step 1 of 3: effects are next)
+## Preset controls
 
 Each `<ui>` knob, button and menu is a param `ctl_N` (float/int, or enum of its state/option
 names), listed first on the root knobs, Gain last. Moving one fires its bindings through their
@@ -80,7 +80,22 @@ the old converter's reading — or `fixed_value`, then `factor`).
 - **`is_loading`** is 1 from a pick until it plays: both hosts' module pages re-read the
   (per-preset) params on its falling edge.
 - `state` adds `"controls":"v0;v1;…"`, applied only when restoring that same preset.
-- Effect bindings already land on `model.effects[i]` params; nothing renders them yet.
+- Effect bindings land on `model.effects[i]`, addressed as (group, effect within it) —
+  `groupIndex`/`effectIndex` resolved to one index at load; `fx_dirty` makes the audio thread
+  recompute that effect's coefficients before the next block.
+
+## Effects (step 2 of 3 done: filters, EQ, gain)
+
+`effects.c`: lowpass (= legacy `lowpass_4pl`), `lowpass_1pl`, highpass, bandpass, notch, peak,
+gain — JUCE's IIR formulas, since DecentSampler is a JUCE plugin. **Peak gain is a LINEAR
+factor at the centre** (JUCE's `A = sqrt(gain)`), which is why Capture's EQ, on by default,
+adds +4..+11 dB per band and peaks a hard note at ~2.4. A wide-open lowpass, a unity peak and a
+disabled effect are exact pass-throughs. Instrument effects run on the mix; group effects run
+inside each note with fresh state, as DecentSampler does. Reverb, delay, chorus, phaser and
+the rest pass through unchanged until step 3.
+
+The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
+(`test_render` E2). Hard notes through a boosted EQ saturate rather than square off.
 
 ## Defaults DecentSampler does not document
 
@@ -90,8 +105,8 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 
 ## Not implemented yet
 
-Effects DSP (step 2: filters/EQ/gain; step 3: reverb/delay/chorus — reuse a permissively
-licensed fleet module, never `schwung-drumverb`), `<modulators>`, `silencedByTags`, xy-pads,
+Effects step 3: reverb, delay, chorus, phaser (reuse a permissively licensed fleet module,
+never `schwung-drumverb`), convolution, pitch shift, wave shaper/folder, `<modulators>`, `silencedByTags`, xy-pads,
 SAMPLE_START/LOOP bindings, per-sample-tag bindings, loop
 crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers. There is no read-only param type, so load status is logged
 (`dspreset: loaded …` / `load failed …`) and served as the `status` get_param key, not shown.

@@ -53,6 +53,24 @@ static void write_wav24(const char *path, unsigned rate, unsigned channels, unsi
     fclose(f);
 }
 
+/* A mono 24-bit sine, for measuring what a filter does to one frequency. */
+static void write_sine24(const char *path, unsigned frames, double hz, double amplitude) {
+    FILE *f = fopen(path, "wb");
+    uint32_t data = frames * 3;
+    CHECK(f);
+    fwrite("RIFF", 1, 4, f); put32(f, 4 + 8 + 16 + 8 + data + (data & 1));
+    fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f); put32(f, 16); put16(f, 1); put16(f, 1); put32(f, 44100);
+    put32(f, 44100 * 3); put16(f, 3); put16(f, 24);
+    fwrite("data", 1, 4, f); put32(f, data);
+    for (unsigned i = 0; i < frames; ++i) {
+        int32_t v = (int32_t)lrint(amplitude * sin(2 * M_PI * hz * i / 44100.0) * 8388607.0);
+        fputc(v & 255, f); fputc((v >> 8) & 255, f); fputc((v >> 16) & 255, f);
+    }
+    if (data & 1) fputc(0, f);
+    fclose(f);
+}
+
 static void write_text(const char *path, const char *text) {
     FILE *f = fopen(path, "wb");
     CHECK(f);

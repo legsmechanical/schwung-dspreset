@@ -17,7 +17,10 @@ source.
   named after the preset (or after what they drive, when the preset draws its names in a
   picture). Layers, mic mixes, envelopes, tuning and volume respond now.
 
-Not yet: DecentSampler's effects (knobs bound to them show up but do nothing yet), and modulators.
+- **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
+
+Not yet: reverb, delay, chorus and the other time-based effects (their knobs show up but do
+nothing yet), and modulators.
 
 ## Using it
 

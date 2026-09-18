@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "dspreset_parser.h"
+#include "effects.h"
 #include "preset_model.h"
 #include "wav_source.h"
 
@@ -18,6 +19,7 @@
 #define DS_RESIDENT_FRAMES (2 * DS_HEAD_FRAMES)
 #define DS_RING_FRAMES 16384            /* per voice, power of two */
 #define DS_FILL_FRAMES 4096             /* one worker read */
+#define DS_VOICE_FX 8                   /* group effects a note carries */
 
 typedef struct {
     ds_wav_source_t file;
@@ -58,6 +60,10 @@ typedef struct {
     uint32_t age, generation;
     uint32_t underruns;
     float vel;                          /* velocity 0..1, re-applied as settings move */
+    /* Its group's effects, fresh per note as in DecentSampler. */
+    unsigned fx_count;
+    unsigned char fx_index[DS_VOICE_FX];
+    ds_fx_state_t fx_state[DS_VOICE_FX];
 } ds_voice_t;
 
 typedef struct {
@@ -90,6 +96,11 @@ typedef struct {
     float tag_volume[DS_MAX_TAGS];
     unsigned char tag_enabled[DS_MAX_TAGS];
     float control_value[DS_MAX_CONTROLS];
+    /* Effects: coefficients per model effect, recomputed on the audio thread
+     * when a binding moves a setting; state for the instrument-level ones. */
+    ds_fx_coeffs_t fx_coeffs[DS_MAX_EFFECTS];
+    unsigned char fx_dirty[DS_MAX_EFFECTS];
+    ds_fx_state_t fx_state[DS_MAX_EFFECTS];
 } ds_native_engine_t;
 
 /* Loading is worker-only: parses XML, opens files, reads every resident head.

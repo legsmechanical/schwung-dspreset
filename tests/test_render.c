@@ -106,6 +106,32 @@ int main(void) {
 
     CHECK(plugin_uint(&p, "underruns") == 0);
 
+    /* E2: past full scale the output bends instead of squaring off: exact up to
+     * 0.9, then strictly between 0.9 and 1.0, and ordered like its input */
+    {
+        int bent = 0;
+        p.api->set_param(p.instance, "gain", "3");
+        note(&p, 1, 60);
+        for (unsigned b = 0; b < 40; ++b) {
+            plugin_render(&p, out);
+            for (unsigned i = 0; i < BLOCK; ++i) {
+                float x = sig((uint64_t)b * BLOCK + i, 0) * 3.0f;
+                float o = out[2 * i] / 32767.0f;
+                if (fabsf(x) <= 0.9f) CHECK(out[2 * i] == (int16_t)(x * 32767));
+                else {
+                    CHECK(fabsf(o) > 0.899f && fabsf(o) <= 1.0f && (o > 0) == (x > 0));
+                    if (fabsf(x) > 1.0f && fabsf(x) < 1.05f) CHECK(fabsf(o) < 0.999f);   /* a hard clip would sit AT 1 */
+                    bent++;
+                }
+            }
+        }
+        note(&p, 0, 60);
+        wait_silent(&p);
+        p.api->set_param(p.instance, "gain", "0.7");
+        printf("  soft clip: %d samples over 0.9 bent, none squared off\n", bent);
+        CHECK(bent > 100);
+    }
+
     /* F: a .dslibrary loads its natural-order FIRST preset ("2" before "10") */
     snprintf(cmd, sizeof(cmd),
              "cd '%s' && rm -rf pkg lib.dslibrary lib.dslibrary.unpacked && mkdir -p pkg/Lib && "

@@ -13,6 +13,7 @@
 #define DS_MAX_CONTROLS 64
 #define DS_MAX_EFFECT_PARAMS 12
 #define DS_MAX_TABLE 64
+#define DS_MAX_EFFECTS 64
 
 enum { DS_CONTROL_KNOB = 0, DS_CONTROL_BUTTON, DS_CONTROL_MENU };
 enum { DS_LEVEL_INSTRUMENT = 0, DS_LEVEL_GROUP, DS_LEVEL_TAG, DS_LEVEL_UI, DS_LEVEL_OTHER };
@@ -29,6 +30,8 @@ enum {
 typedef struct {
     int target, level;
     int position;                     /* group / effect / control index; -1 = by tags */
+    int effect;                       /* type effect: index into model.effects, -1 = none (resolved at load) */
+    int effect_group, effect_index;   /* as written: groupIndex (-1 = instrument) and effectIndex */
     uint64_t tag_mask;                /* level tag, or groups chosen by tags */
     char name[32];                    /* the DS parameter token, for labels and effects */
     int translation;
