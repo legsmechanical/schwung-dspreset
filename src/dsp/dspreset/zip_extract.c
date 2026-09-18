@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <zlib.h>
+#include "zlib_compat.h"
 
 #define COPY_BUFFER_BYTES 65536
 #define PATH_BUFFER_BYTES 1024

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Install Multisampler module to Move.
-# Module id "sfz" preserved for seamless upgrades from previous SFZ Player.
+# Install the native DSPreset module to Move.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,17 +7,17 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$REPO_ROOT"
 
-if [ ! -d "dist/sfz" ]; then
-    echo "Error: dist/sfz not found. Run ./scripts/build.sh first."
+if [ ! -d "dist/dspreset" ]; then
+    echo "Error: dist/dspreset not found. Run ./scripts/build.sh first."
     exit 1
 fi
 
-echo "=== Installing Multisampler ==="
+echo "=== Installing DSPreset ==="
 
 # Deploy to Move - sound_generators subdirectory
 echo "Copying module to Move..."
-ssh ableton@move.local "mkdir -p /data/UserData/schwung/modules/sound_generators/sfz"
-scp -r dist/sfz/* ableton@move.local:/data/UserData/schwung/modules/sound_generators/sfz/
+ssh ableton@move.local "mkdir -p /data/UserData/schwung/modules/sound_generators/dspreset"
+scp -r dist/dspreset/* ableton@move.local:/data/UserData/schwung/modules/sound_generators/dspreset/
 
 # Install chain presets if they exist
 if [ -d "src/chain_patches" ]; then
@@ -28,15 +27,15 @@ fi
 
 # Create instruments directory for user sample libraries
 echo "Creating instruments directory..."
-ssh ableton@move.local "mkdir -p /data/UserData/schwung/modules/sound_generators/sfz/instruments"
+ssh ableton@move.local "mkdir -p /data/UserData/schwung/modules/sound_generators/dspreset/instruments"
 
 # Set permissions so Module Store can update later
 echo "Setting permissions..."
-ssh ableton@move.local "chmod -R a+rw /data/UserData/schwung/modules/sound_generators/sfz"
+ssh ableton@move.local "chmod -R a+rw /data/UserData/schwung/modules/sound_generators/dspreset"
 
 echo ""
 echo "=== Install Complete ==="
-echo "Module installed to: /data/UserData/schwung/modules/sound_generators/sfz/"
+echo "Module installed to: /data/UserData/schwung/modules/sound_generators/dspreset/"
 echo ""
-echo "Upload SFZ or DecentSampler library folders to the instruments/ subdirectory."
-echo "Restart Schwung to load the new module."
+echo "Load DSPreset files or DSLibrary packages from the Library parameter."
+echo "Restart Schwung with the workspace canonical restart script before loading it."

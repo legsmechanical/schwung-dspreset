@@ -45,6 +45,7 @@ for src in src/dsp/dspreset_plugin.c \
     ${CROSS_PREFIX}gcc -O3 -fPIC \
         -march=armv8-a -mtune=cortex-a72 \
         -DNDEBUG \
+        ${EXTRA_CFLAGS:-} \
         -c "$src" \
         -o "$obj" \
         -Isrc/dsp
@@ -58,7 +59,7 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     build/zip_index.o build/zip_extract.o build/voice.o \
     build/page_cache.o build/wav_source.o \
     -o build/dsp.so \
-    -lm -lpthread -lz
+    -lm -lpthread ${ZLIB_LINK:--lz}
 
 echo "DSP plugin linked"
 
