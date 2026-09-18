@@ -97,6 +97,16 @@ the rest pass through unchanged until step 3.
 The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 (`test_render` E2). Hard notes through a boosted EQ saturate rather than square off.
 
+## The module's amp envelope (every preset)
+
+An **Amp Envelope** page: `amp_attack` / `amp_decay` / `amp_sustain` / `amp_release`, stepped
+enums whose step 0 is **"Preset"** (the preset's value stands). Any other step REPLACES the
+preset's value — even one a `<sample>` sets itself — so releases can be lengthened as well as
+shortened (Josh, 2026-09-18: override, not a second stage). Ignored by zones with no amp
+envelope. The plugin copies the steps into `engine->amp_override[]` on the audio thread before
+every MIDI call and block; a Sustain moved while a note is held glides there (≥ 20 ms).
+Saved in `state` as `"amp":"a;d;s;r"` step indices.
+
 ## Modulators
 
 `<lfo>`, `<envelope>`, `<midiCC>`, `<midiVelocity>` in `preset_model.c`; run in

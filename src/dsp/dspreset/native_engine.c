@@ -91,6 +91,7 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     if (!e || !preset_path || !output_rate) return -1;
     memset(e, 0, sizeof(*e));
     e->output_rate = output_rate;
+    for (int i = 0; i < 4; ++i) e->amp_override[i] = -1.0f;
     e->bend_ratio = 1.0;
     e->rng = 0x12345678u;
     for (int i = 0; i < DS_MAX_VOICES; ++i) { e->voices[i].generation = (uint32_t)i; e->stream_fd[i] = -1; }
@@ -228,6 +229,8 @@ static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const
     out->vel_track = (d->own_mask & DS_OWN_VEL_TRACK) ? d->amp_vel_track : g->has_vel_track ? g->vel_track : in->vel_track;
     for (int i = 0; i < 4; ++i)
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
+    for (int i = 0; i < 4; ++i)                                  /* the module's envelope, where set, wins */
+        if (e->amp_override[i] >= 0) out->env[i] = e->amp_override[i];
     if (out->pan < -1) out->pan = -1;
     if (out->pan > 1) out->pan = 1;
 }
@@ -691,6 +694,18 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
         v->inc = ((double)v->src->file.sample_rate / e->output_rate) *
                  pow(2.0, (v->note - v->zone->def.root_note + now.tuning) / 12.0);
+        /* A Sustain moved while the note is held: glide there (never a jump). */
+        if (v->zone->def.amp_env_enabled && (v->env_stage == DS_ENV_DECAY || v->env_stage == DS_ENV_SUSTAIN)) {
+            float target = now.env[2] < 0 ? 0 : now.env[2] > 1 ? 1 : now.env[2];
+            if (fabsf(target - v->env_sustain) > 1e-4f) {
+                v->env_sustain = target;
+                if (v->env_stage == DS_ENV_SUSTAIN) {
+                    float glide = coef_for(0.02f, e->output_rate);
+                    v->env_stage = DS_ENV_DECAY;
+                    if (v->env_decay_coef < glide) v->env_decay_coef = glide;
+                }
+            }
+        }
     }
     inc = v->inc * e->bend_ratio;
     for (unsigned i = 0; i < frames; ++i) {
@@ -708,7 +723,8 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
             break;
         case DS_ENV_DECAY:
             v->env_level = v->env_sustain + (v->env_level - v->env_sustain) * v->env_decay_coef;
-            if (v->env_level - v->env_sustain < 1e-4f) { v->env_level = v->env_sustain; v->env_stage = DS_ENV_SUSTAIN; }
+            /* either way: a Sustain raised while held glides UP through this stage */
+            if (fabsf(v->env_level - v->env_sustain) < 1e-4f) { v->env_level = v->env_sustain; v->env_stage = DS_ENV_SUSTAIN; }
             break;
         case DS_ENV_SUSTAIN:
             if (v->env_level < SILENT) v->env_stage = DS_ENV_DONE;

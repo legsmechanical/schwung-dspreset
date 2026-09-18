@@ -123,6 +123,11 @@ typedef struct {
     float cc_value[128];
     unsigned keys_held;
     unsigned char fx_modulated[DS_MAX_EFFECTS];
+    /* The module's own amp envelope: attack, decay, sustain, release. A value
+     * below 0 means "Preset" (keep what the preset says); otherwise it REPLACES
+     * the preset's value for every zone that has an amp envelope. Written by the
+     * audio thread only (the plugin copies it in before each MIDI call and block). */
+    float amp_override[4];
     ds_fx_coeffs_t fx_live[DS_MAX_EFFECTS];
     ds_fx_built_t fx_live_built[DS_MAX_EFFECTS];
     uint32_t fx_rebuilds;               /* coefficient rebuilds for modulation, for tests */

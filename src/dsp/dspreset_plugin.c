@@ -36,6 +36,37 @@ typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(co
 
 static const host_api_v1_t *g_host;
 
+/* ---- the module's own amp envelope ---------------------------------------
+ * Four stepped knobs. Step 0 is "Preset": the preset's own value stands. Any
+ * other step REPLACES it on every preset (Josh, 2026-09-18: override, not a
+ * second stage), so a release can be made longer as well as shorter. */
+enum { AMP_ATTACK = 0, AMP_DECAY, AMP_SUSTAIN, AMP_RELEASE };
+typedef struct { const char *label; float value; } amp_step_t;
+static const amp_step_t AMP_TIMES[] = {
+    {"Preset", -1}, {"0 ms", 0}, {"2 ms", 0.002f}, {"5 ms", 0.005f}, {"10 ms", 0.01f}, {"20 ms", 0.02f},
+    {"50 ms", 0.05f}, {"100 ms", 0.1f}, {"200 ms", 0.2f}, {"350 ms", 0.35f}, {"500 ms", 0.5f},
+    {"750 ms", 0.75f}, {"1 s", 1}, {"1.5 s", 1.5f}, {"2 s", 2}, {"3 s", 3}, {"5 s", 5}, {"7.5 s", 7.5f},
+    {"10 s", 10}, {"15 s", 15}, {"20 s", 20}};
+static const amp_step_t AMP_LEVELS[] = {
+    {"Preset", -1}, {"0%", 0}, {"5%", 0.05f}, {"10%", 0.1f}, {"15%", 0.15f}, {"20%", 0.2f}, {"25%", 0.25f},
+    {"30%", 0.3f}, {"35%", 0.35f}, {"40%", 0.4f}, {"45%", 0.45f}, {"50%", 0.5f}, {"55%", 0.55f},
+    {"60%", 0.6f}, {"65%", 0.65f}, {"70%", 0.7f}, {"75%", 0.75f}, {"80%", 0.8f}, {"85%", 0.85f},
+    {"90%", 0.9f}, {"95%", 0.95f}, {"100%", 1}};
+static const char *AMP_KEYS[4] = {"amp_attack", "amp_decay", "amp_sustain", "amp_release"};
+static const char *AMP_NAMES[4] = {"Attack", "Decay", "Sustain", "Release"};
+#define AMP_TIME_STEPS (int)(sizeof(AMP_TIMES) / sizeof(AMP_TIMES[0]))
+#define AMP_LEVEL_STEPS (int)(sizeof(AMP_LEVELS) / sizeof(AMP_LEVELS[0]))
+
+static const amp_step_t *amp_steps(int stage, int *count) {
+    *count = stage == AMP_SUSTAIN ? AMP_LEVEL_STEPS : AMP_TIME_STEPS;
+    return stage == AMP_SUSTAIN ? AMP_LEVELS : AMP_TIMES;
+}
+
+static int amp_stage_of(const char *key) {
+    for (int i = 0; i < 4; ++i) if (!strcmp(key, AMP_KEYS[i])) return i;
+    return -1;
+}
+
 /* ---- lock-free publication ----------------------------------------------
  * get_param/set_param can be served on the audio thread, so nothing they touch
  * may lock. Strings cross threads through a seqlock: one writer, readers retry
@@ -75,6 +106,7 @@ typedef struct {
     _Atomic int unpacking_bank, loading, worker_running;
     _Atomic uint32_t load_count;        /* engines actually built, for tests */
     _Atomic float gain;
+    _Atomic int amp_step[4];            /* the module's amp envelope: 0 = "Preset" */
     seqstr_t request;                   /* preset_path / state from the host */
     seqstr_t request_controls;          /* control positions from a restored state */
     _Atomic uint32_t request_gen;
@@ -364,6 +396,15 @@ static void destroy_instance(void *opaque) {
     free(in);
 }
 
+/* The module's envelope into the engine: on the audio thread, the engine's only writer. */
+static void sync_amp(dspreset_instance_t *in, ds_native_engine_t *engine) {
+    for (int i = 0; i < 4; ++i) {
+        int count, step = atomic_load_explicit(&in->amp_step[i], memory_order_relaxed);
+        const amp_step_t *steps = amp_steps(i, &count);
+        engine->amp_override[i] = step > 0 && step < count ? steps[step].value : -1.0f;
+    }
+}
+
 static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
     dspreset_instance_t *in = opaque;
     ds_native_engine_t *engine;
@@ -372,6 +413,7 @@ static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
     atomic_fetch_add(&in->audio_users, 1);
     engine = atomic_load(&in->active);
     if (engine) {
+        sync_amp(in, engine);
         switch (msg[0] & 0xf0) {
         case 0x90: if (len >= 3) ds_native_engine_note_on(engine, msg[1], msg[2]); break;
         case 0x80: ds_native_engine_note_off(engine, msg[1]); break;
@@ -421,6 +463,14 @@ static void set_param(void *opaque, const char *key, const char *value) {
         if (!c || bank < 0 || bank >= (int)c->bank_count) return;
         if (preset < 0 || preset >= (int)c->banks[bank].preset_count) return;
         if (preset != atomic_load(&in->sel_preset)) { atomic_store(&in->busy, 1); select_bank_preset(in, bank, preset); }
+    } else if (amp_stage_of(key) >= 0) {
+        int stage = amp_stage_of(key), count, step;
+        const amp_step_t *steps = amp_steps(stage, &count);
+        char *tail;
+        step = (int)strtol(value, &tail, 10);
+        if (tail == value || *tail)                              /* a host that speaks option names ("5 s") */
+            for (step = 0; step < count && strcmp(steps[step].label, value); ++step) {}
+        if (step >= 0 && step < count) atomic_store(&in->amp_step[stage], step);
     } else if (!strncmp(key, "ctl_", 4)) {
         int i = atoi(key + 4);
         if (i < 0 || i >= DS_MAX_CONTROLS) return;
@@ -433,6 +483,21 @@ static void set_param(void *opaque, const char *key, const char *value) {
         char path[1024], gain[32], controls[1024];
         if (json_string(value, "gain", gain, sizeof(gain))) atomic_store(&in->gain, strtof(gain, NULL));
         if (!json_string(value, "controls", controls, sizeof(controls))) controls[0] = '\0';
+        {
+            char amp[64];
+            if (json_string(value, "amp", amp, sizeof(amp))) {
+                const char *q = amp;
+                for (int i = 0; i < 4 && *q; ++i) {
+                    char *tail;
+                    int count, step = (int)strtol(q, &tail, 10);
+                    amp_steps(i, &count);
+                    if (tail != q && step >= 0 && step < count) atomic_store(&in->amp_step[i], step);
+                    q = strchr(tail, ';');
+                    if (!q) break;
+                    ++q;
+                }
+            }
+        }
         seqstr_write(&in->request_controls, controls);
         if (json_string(value, "preset_path", path, sizeof(path)) && path[0]) request_path(in, path);
     } else if (!strcmp(key, "gain")) {
@@ -473,10 +538,12 @@ static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
                    "\"params\":[{\"level\":\"banks\",\"label\":\"Banks\"}");
     unsigned controls = e ? e->model.control_count : 0;
     for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, ",\"ctl_%u\"", i);
-    k = append(out, k, n, ",\"gain\"],\"knobs\":[");
+    k = append(out, k, n, ",{\"level\":\"amp\",\"label\":\"Amp Envelope\"},\"gain\"],\"knobs\":[");
     for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "\"ctl_%u\",", i);
     return append(out, k, n, "\"gain\"]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
-                  "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"}}}");
+                  "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"},"
+                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\"],"
+                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\"]}}}");
 }
 
 static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsigned presets, char *out, int n) {
@@ -484,6 +551,13 @@ static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsig
                    "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
                    "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}",
                    presets ? presets - 1 : 0, banks ? banks - 1 : 0);
+    for (int stage = 0; stage < 4; ++stage) {
+        int count;
+        const amp_step_t *steps = amp_steps(stage, &count);
+        k = append(out, k, n, ",{\"key\":\"%s\",\"name\":\"%s\",\"type\":\"enum\",\"options\":[", AMP_KEYS[stage], AMP_NAMES[stage]);
+        for (int o = 0; o < count; ++o) k = append(out, k, n, "%s\"%s\"", o ? "," : "", steps[o].label);
+        k = append(out, k, n, "],\"default\":0}");
+    }
     for (unsigned i = 0; e && i < e->model.control_count; ++i) {
         const ds_control_t *c = &e->model.controls[i];
         char name[80];
@@ -535,7 +609,8 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
                        (double)atomic_load(&in->gain));
             for (unsigned i = 0; engine && i < engine->model.control_count; ++i)
                 k = append(out, k, out_len, "%s%g", i ? ";" : "", (double)engine->control_value[i]);
-            k = append(out, k, out_len, "\"}");
+            k = append(out, k, out_len, "\",\"amp\":\"%d;%d;%d;%d\"}", atomic_load(&in->amp_step[0]), atomic_load(&in->amp_step[1]),
+                       atomic_load(&in->amp_step[2]), atomic_load(&in->amp_step[3]));
         } else {
             unsigned i = (unsigned)atoi(key + 4);
             if (engine && i < engine->model.control_count) {
@@ -547,6 +622,7 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
         atomic_fetch_sub(&in->audio_users, 1);
         return k;
     }
+    if (amp_stage_of(key) >= 0) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->amp_step[amp_stage_of(key)])), out_len);
     if (!strcmp(key, "is_loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->busy) ? 1 : 0), out_len);
     if (!strcmp(key, "bank_list")) {
         int k = snprintf(out, (size_t)out_len, "[");
@@ -624,6 +700,7 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     engine = atomic_load(&in->active);
     if (engine) {
         uint64_t dirty = atomic_exchange(&in->ctl_dirty, 0);
+        sync_amp(in, engine);
         for (unsigned i = 0; dirty; ++i, dirty >>= 1)
             if (dirty & 1) ds_native_engine_set_control(engine, i, atomic_load(&in->ctl_pending[i]));
         ds_native_engine_render(engine, buffer, (unsigned)frames);
