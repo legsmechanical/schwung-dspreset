@@ -31,7 +31,7 @@ static const char *PRESET =
     "</tab></ui>\n"
     "<groups attack=\"0\" release=\"0.2\">\n"
     "  <group name=\"Close\" tags=\"mic1\"><sample path=\"a.wav\" rootNote=\"60\" loNote=\"60\" hiNote=\"60\"/></group>\n"
-    "  <group name=\"Room\" tags=\"mic2\"><sample path=\"b.wav\" rootNote=\"60\" loNote=\"60\" hiNote=\"60\"/></group>\n"
+    "  <group name=\"Room\" tags=\"mic2\" modVolume=\"0.5\"><sample path=\"b.wav\" rootNote=\"60\" loNote=\"60\" hiNote=\"60\"/></group>\n"
     "  <group name=\"Layer B\" enabled=\"false\"><sample path=\"c.wav\" rootNote=\"62\" loNote=\"62\" hiNote=\"62\"/></group>\n"
     "  <group name=\"Layer A\"><sample path=\"d.wav\" rootNote=\"62\" loNote=\"62\" hiNote=\"62\"/></group>\n"
     "</groups>\n"
@@ -89,17 +89,18 @@ int main(void) {
     CHECK(e.model.controls[4].kind == DS_CONTROL_MENU && e.control_value[4] == 0);   /* menu value 1 = first option */
 
     /* group volume and tag volume, live on a sounding note: both groups play
-     * the same signal, so the output is (close + room) x signal */
+     * the same signal, so the output is (close + room) x signal, and Room
+     * starts at its modVolume of 0.5 */
     ds_native_engine_note_on(&e, 60, 127);
-    expect_level(&e, &frame, 2.0f, "both mics at full");
+    expect_level(&e, &frame, 1.5f, "Close full + Room at modVolume 0.5");
     ds_native_engine_set_control(&e, 0, 0.5f);
-    expect_level(&e, &frame, 1.5f, "Close at half, while held");
+    expect_level(&e, &frame, 1.0f, "Close at half, while held");
     ds_native_engine_set_control(&e, 1, 25);
-    expect_level(&e, &frame, 0.75f, "mic2 tag at 25");
+    expect_level(&e, &frame, 0.625f, "mic2 tag at 25");
     /* a MIDI CC drives the Close knob through the preset's own mapping */
     ds_native_engine_cc(&e, 1, 0);
     CHECK(e.control_value[0] == 0);
-    expect_level(&e, &frame, 0.25f, "CC1 at 0 turns Close down");
+    expect_level(&e, &frame, 0.125f, "CC1 at 0 turns Close down");
     silence(&e);
 
     /* the layer button chooses which group a note plays */

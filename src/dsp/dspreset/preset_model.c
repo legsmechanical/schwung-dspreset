@@ -186,6 +186,10 @@ static void group_settings(ds_group_settings_t *g, const char *a, const char *e,
     memset(g, 0, sizeof(*g));
     g->volume = 1;
     if (a) attr_volume(a, e, &g->volume);
+    /* modVolume: the group's level as the DecentSampler app saves it (the value
+     * its AMP_VOLUME modulation starts from). Undocumented; CS-20M sets its
+     * second oscillator to 0.53 and its noise layer to 0.01 with it. */
+    if (a && attr_num(a, e, "modVolume", &f)) g->volume *= f < 0 ? 0 : f;
     g->tuning = a && attr_num(a, e, "groupTuning", &f) ? f : 0;
     g->has_pan = a && attr_num(a, e, "pan", &g->pan);
     g->pan /= 100.0f;

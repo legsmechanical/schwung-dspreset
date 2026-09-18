@@ -23,6 +23,20 @@ int main(void) {
             CHECK(frames[i * 2 + c] == test_signal24(i + 5, c) / 8388608.0f);
     ds_wav_source_close(&source);
 
+    /* AIFF: big-endian 24-bit, the same frames; its INST sustain loop over MARK
+     * markers is the file's own loop (the end marker is exclusive) */
+    snprintf(path, sizeof(path), "%s/stereo_loop.aif", dir);
+    write_aiff24(path, 2, 70001, 40000, 50000);
+    CHECK(ds_wav_source_open(&source, path, error, sizeof(error)) == 0);
+    CHECK(source.sample_rate == 44100 && source.channels == 2 && source.bits_per_sample == 24 && source.big_endian);
+    CHECK(source.frame_count == 70001);
+    CHECK(source.has_loop && source.loop_start == 40000 && source.loop_end == 49999);
+    CHECK(ds_wav_source_read_frames(&source, 5, frames, 70000, error, sizeof(error)) == 69996);
+    for (unsigned i = 0; i < 69996; ++i)
+        for (unsigned c = 0; c < 2; ++c)
+            CHECK(frames[i * 2 + c] == test_signal24(i + 5, c) / 8388608.0f);
+    ds_wav_source_close(&source);
+
     snprintf(path, sizeof(path), "%s/missing.wav", dir);
     CHECK(ds_wav_source_open(&source, path, error, sizeof(error)) != 0);
     CHECK(strstr(error, "missing"));

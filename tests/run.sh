@@ -5,6 +5,7 @@
 # Real-library fixtures are not committed. Point at them with:
 #   DSPRESET_CAPTURE=/path/Capture GO-TO Bass.dspreset
 #   DSPRESET_ASIMOV_DIR=/path/ASIMOV v1.0          (folder of 15 .dspreset)
+#   DSPRESET_CS20M_BUNDLE=/path/Yamaha CS-20M.dsbundle  (21 presets, one on AIFF)
 # A missing fixture FAILS the run. DSPRESET_ALLOW_MISSING_FIXTURES=1 turns that
 # into a named SKIP, which is reported beside the count.
 set -u
@@ -59,9 +60,9 @@ for t in $tests; do
     fi
     case "$name" in
         test_real_libraries)
-            if [ ! -f "${DSPRESET_CAPTURE:-}" ] || [ ! -d "${DSPRESET_ASIMOV_DIR:-}" ]; then
+            if [ ! -f "${DSPRESET_CAPTURE:-}" ] || [ ! -d "${DSPRESET_ASIMOV_DIR:-}" ] || [ ! -d "${DSPRESET_CS20M_BUNDLE:-}" ]; then
                 if [ "${DSPRESET_ALLOW_MISSING_FIXTURES:-}" = 1 ]; then skipped+=("$name"); continue; fi
-                echo "FAILED: $name needs DSPRESET_CAPTURE and DSPRESET_ASIMOV_DIR (or DSPRESET_ALLOW_MISSING_FIXTURES=1)"
+                echo "FAILED: $name needs DSPRESET_CAPTURE, DSPRESET_ASIMOV_DIR and DSPRESET_CS20M_BUNDLE (or DSPRESET_ALLOW_MISSING_FIXTURES=1)"
                 fail=$((fail + 1)); continue
             fi ;;
         test_zip_index) run "$name" "$BUILD/$name" "$ARCHIVE"; continue ;;

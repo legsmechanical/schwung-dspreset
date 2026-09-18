@@ -137,7 +137,7 @@ ds_catalog_t *ds_catalog_scan(const char *instruments_dir) {
             if (snprintf(b->path, sizeof(b->path), "%s/%s", instruments_dir, entry->d_name) >= (int)sizeof(b->path) ||
                 stat(b->path, &st)) continue;
             snprintf(b->name, sizeof(b->name), "%.127s", entry->d_name);   /* display only */
-            if (S_ISDIR(st.st_mode)) b->kind = DS_BANK_FOLDER;
+            if (S_ISDIR(st.st_mode)) { b->kind = DS_BANK_FOLDER; strip(b->name, ".dsbundle"); }   /* a macOS bundle is a folder */
             else if (S_ISREG(st.st_mode) && has_suffix(entry->d_name, ".dslibrary")) { b->kind = DS_BANK_DSLIBRARY; strip(b->name, ".dslibrary"); }
             else if (S_ISREG(st.st_mode) && has_suffix(entry->d_name, ".dspreset")) { b->kind = DS_BANK_FILE; strip(b->name, ".dspreset"); }
             else continue;

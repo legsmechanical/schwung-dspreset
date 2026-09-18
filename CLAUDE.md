@@ -20,9 +20,9 @@ that tree is still here and is **not built** — see *Vestigial* below.
 | `src/dsp/dspreset_plugin.c` | API v2 wrapper. Worker thread: loads presets, unpacks `.dslibrary`, streams. Swaps engines atomically and frees the old one once no audio call holds it. |
 | `src/dsp/dspreset/dspreset_parser.c` | XML → zones. `<groups>` → `<group>` → `<sample>` inheritance; volumes multiply, `groupTuning` adds; whitespace around `=`, entities and comments are handled. |
 | `src/dsp/dspreset/native_engine.c` | Zones, resident heads, per-voice stream rings, envelopes, round robin, render. |
-| `src/dsp/dspreset/catalog.c` | The Banks list: each top-level folder / `.dslibrary` / loose `.dspreset` under `<module>/instruments/`, its presets in natural order. |
+| `src/dsp/dspreset/catalog.c` | The Banks list: each top-level folder / `.dslibrary` / loose `.dspreset` under `<module>/instruments/`, its presets in natural order. A `.dsbundle` is a folder (macOS shows it as a file); its suffix is dropped from the bank name. |
 | `src/dsp/dspreset/preset_model.c` | Everything a user can change: the group table, tags, `<ui>` controls (knob / button / menu) and their `<binding>`s, `<midi>` CC maps, the `<effects>` list. Control labels fall back to what the control drives. |
-| `src/dsp/dspreset/wav_source.c` | WAV reader (PCM16/24/32, float32, EXTENSIBLE), block `pread`s, the file's own `smpl` loop. |
+| `src/dsp/dspreset/wav_source.c` | Sample reader: WAV (PCM16/24/32, float32, EXTENSIBLE) and AIFF / AIFF-C (big-endian PCM 8–32, `sowt`, `fl32`); block `pread`s; the file's own loop (`smpl`, or AIFF INST sustain loop over MARK markers, end marker exclusive). No FLAC yet. |
 | `src/dsp/dspreset/{library_*,zip_*}.c` | `.dslibrary` → `<file>.dslibrary.unpacked/`, transactionally. |
 
 ## How playback works (the part that is easy to break)
@@ -99,13 +99,18 @@ The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 
 ## Defaults DecentSampler does not document
 
+`modVolume` on a group (undocumented; what the DecentSampler app saves) multiplies the group's
+volume — CS-20M uses it for its second oscillator (0.53) and noise layer (0.01).
+
 Release 0.5 s when a preset sets none (the old Multisampler's finding: a near-zero release cuts
 pianos off). A file's `smpl` loop is used unless `loopEnabled="false"`. Attack 0, decay 0,
 sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrack` t (default 1).
 
 ## Not implemented yet
 
-Effects step 3: reverb, delay, chorus, phaser (reuse a permissively licensed fleet module,
+**`<modulators>` (LFOs, envelopes)** — 5 of CS-20M's 21 presets rest their filters at 33 Hz
+and open them only with an envelope, so they are near-silent without it. Effects step 3
+(PARKED by Josh 2026-09-18): reverb, delay, chorus, phaser (reuse a permissively licensed fleet module,
 never `schwung-drumverb`), convolution, pitch shift, wave shaper/folder, `<modulators>`, `silencedByTags`, xy-pads,
 SAMPLE_START/LOOP bindings, per-sample-tag bindings, loop
 crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers. There is no read-only param type, so load status is logged
@@ -120,8 +125,8 @@ tests/run.sh                          # native build + every test; see the heade
 ```
 
 `tests/run.sh` fails on a missing tool or fixture. The real-library test needs
-`DSPRESET_CAPTURE` (Capture GO-TO Bass .dspreset) and `DSPRESET_ASIMOV_DIR` (folder of the 15
-ASIMOV presets); `DSPRESET_ALLOW_MISSING_FIXTURES=1` makes it a named SKIP. Libraries are never
+`DSPRESET_CAPTURE` (Capture GO-TO Bass .dspreset), `DSPRESET_ASIMOV_DIR` (folder of the 15
+ASIMOV presets) and `DSPRESET_CS20M_BUNDLE` (the Yamaha CS-20M `.dsbundle`); `DSPRESET_ALLOW_MISSING_FIXTURES=1` makes it a named SKIP. Libraries are never
 committed. `tests/test_render.c` checks output **sample-for-sample** against synthetic files at
 real-time pace through the real plugin — keep new tests at that standard.
 

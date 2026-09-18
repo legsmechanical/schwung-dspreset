@@ -189,11 +189,51 @@ static void asimov(plugin_t *p, const char *dir_path) {
     CHECK(plugin_uint(p, "underruns") == 0);
 }
 
+/* Yamaha CS-20M: a .dsbundle (a folder macOS shows as one file) of 21 presets,
+ * one of them on AIFF samples. Reached the way a user reaches it — as a bank. */
+static void cs20m(const char *bundle) {
+    const char *tmp = getenv("TEST_TMP");
+    char mod[512], cmd[2048], value[4096], status[256], name[128];
+    plugin_t p;
+    int16_t out[BLOCK * 2];
+    double level = 0, late = 0;
+    CHECK(tmp);
+    snprintf(mod, sizeof(mod), "%s/cs20m-module", tmp);
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' && mkdir -p '%s/instruments' && ln -s '%s' '%s/instruments/Yamaha CS-20M.dsbundle'",
+             mod, mod, bundle, mod);
+    CHECK(system(cmd) == 0);
+    plugin_open_in(&p, mod);
+    usleep(700000);
+    plugin_get(&p, "bank_list", value, sizeof(value));
+    CHECK(!strcmp(value, "[{\"label\":\"Yamaha CS-20M\",\"index\":0}]"));
+    CHECK(plugin_uint(&p, "preset_count") == 21);
+    p.api->set_param(p.instance, "preset", "2");
+    plugin_get(&p, "preset_name", name, sizeof(name));
+    CHECK(!strcmp(name, "03 Blue Moon"));
+    for (int i = 0; i < 500; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
+    plugin_get(&p, "status", status, sizeof(status));
+    printf("  CS-20M: %s\n", status);
+    CHECK(!strcmp(status, "03 Blue Moon.dspreset: 45 zones"));   /* AIFF, none missing */
+    clock_gettime(CLOCK_MONOTONIC, &p.next);
+    plugin_midi(&p, 0x90, 48, 100);
+    for (int b = 0; b < 700; ++b) {
+        plugin_render(&p, out);
+        if (b >= 20 && b < 60) level += rms(out, BLOCK * 2) / 40;
+        if (b >= 650) late += rms(out, BLOCK * 2) / 50;
+    }
+    plugin_midi(&p, 0x80, 48, 0);
+    printf("  Blue Moon (AIFF) note 48: %.4f, at 2 s %.4f\n", level, late);
+    CHECK(level > 0.01 && late > 0.001 && plugin_uint(&p, "underruns") == 0);
+    plugin_close(&p);
+}
+
 int main(void) {
     const char *capture_path = getenv("DSPRESET_CAPTURE");
     const char *asimov_dir = getenv("DSPRESET_ASIMOV_DIR");
+    const char *cs20m_bundle = getenv("DSPRESET_CS20M_BUNDLE");
     plugin_t p;
-    CHECK(capture_path && asimov_dir);
+    CHECK(capture_path && asimov_dir && cs20m_bundle);
+    cs20m(cs20m_bundle);
     plugin_open(&p);
     capture(&p, capture_path);
     asimov(&p, asimov_dir);

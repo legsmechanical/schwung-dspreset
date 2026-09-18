@@ -71,6 +71,37 @@ static void write_sine24(const char *path, unsigned frames, double hz, double am
     fclose(f);
 }
 
+/* 24-bit big-endian AIFF carrying the same signal as write_wav24, with an
+ * INST sustain loop over MARK markers when loop_start >= 0 (end exclusive). */
+static void put16be(FILE *f, unsigned v) { fputc((v >> 8) & 255, f); fputc(v & 255, f); }
+static void put32be(FILE *f, uint32_t v) { put16be(f, v >> 16); put16be(f, v & 0xffff); }
+static void write_aiff24(const char *path, unsigned channels, unsigned frames, long loop_start, long loop_end) {
+    FILE *f = fopen(path, "wb");
+    uint32_t data = frames * channels * 3, mark = loop_start >= 0 ? 2 + 2 * (6 + 4) : 0, inst = loop_start >= 0 ? 20 : 0;
+    static const unsigned char rate44100[10] = {0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0};
+    CHECK(f);
+    fwrite("FORM", 1, 4, f);
+    put32be(f, 4 + 8 + 18 + (mark ? 8 + mark : 0) + (inst ? 8 + inst : 0) + 8 + 8 + data + (data & 1));
+    fwrite("AIFF", 1, 4, f);
+    fwrite("COMM", 1, 4, f); put32be(f, 18); put16be(f, channels); put32be(f, frames); put16be(f, 24); fwrite(rate44100, 1, 10, f);
+    if (mark) {   /* two markers, each: id, position, pstring "Lp" (len 2 + text, padded to 4) */
+        fwrite("MARK", 1, 4, f); put32be(f, mark); put16be(f, 2);
+        put16be(f, 1); put32be(f, (uint32_t)loop_start); fputc(2, f); fwrite("Lb", 1, 2, f); fputc(0, f);
+        put16be(f, 2); put32be(f, (uint32_t)loop_end); fputc(2, f); fwrite("Le", 1, 2, f); fputc(0, f);
+        fwrite("INST", 1, 4, f); put32be(f, inst);
+        fputc(60, f); fputc(0, f); fputc(0, f); fputc(127, f); fputc(0, f); fputc(127, f); put16be(f, 0);
+        put16be(f, 1); put16be(f, 1); put16be(f, 2);   /* sustain loop: forward, marker 1 .. marker 2 */
+        put16be(f, 0); put16be(f, 0); put16be(f, 0);   /* release loop: off */
+    }
+    fwrite("SSND", 1, 4, f); put32be(f, 8 + data); put32be(f, 0); put32be(f, 0);
+    for (unsigned i = 0; i < frames; ++i) for (unsigned c = 0; c < channels; ++c) {
+        int32_t v = test_signal24(i, c);
+        fputc((v >> 16) & 255, f); fputc((v >> 8) & 255, f); fputc(v & 255, f);
+    }
+    if (data & 1) fputc(0, f);
+    fclose(f);
+}
+
 static void write_text(const char *path, const char *text) {
     FILE *f = fopen(path, "wb");
     CHECK(f);

@@ -11,7 +11,9 @@ source.
   pan, amp envelope, loops (including loop points stored in the WAV files), release samples,
   sustain pedal and pitch bend.
 - **Missing samples don't stop a preset loading** — the rest of it plays.
-- **`.dslibrary` packages** are unpacked on the Move the first time you pick one.
+- **`.dslibrary` packages** are unpacked on the Move the first time you pick one; a **`.dsbundle`**
+  (a folder) is a bank as it is.
+- **WAV and AIFF samples.**
 
 - **The preset's own controls** — its knobs, buttons and menus — are on the module's knobs,
   named after the preset (or after what they drive, when the preset draws its names in a
@@ -20,7 +22,8 @@ source.
 - **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
 
 Not yet: reverb, delay, chorus and the other time-based effects (their knobs show up but do
-nothing yet), and modulators.
+nothing yet), modulators (LFOs and envelopes — synth-style presets that sweep their filter with
+one play closed), and FLAC samples.
 
 ## Using it
 
