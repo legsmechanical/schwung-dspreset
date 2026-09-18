@@ -99,14 +99,17 @@ adds +4..+11 dB per band and peaks a hard note at ~2.4. A wide-open lowpass, a u
 disabled effect are exact pass-throughs. Instrument effects run on the mix; group effects run
 inside each note with fresh state, as DecentSampler does.
 
-**Reverb** (`reverb.c`) is a Dattorro plate written from the 1997 paper, not DecentSampler's
-own JUCE Freeverb (`juce::Reverb` — confirmed by Josh 2026-09-18, not inferred from
-the matching parameter names). `roomSize` / `damping` / `wetLevel` are MAPPED so the plate rings as long,
-darkens as fast and sits as loud as JUCE's Freeverb at the same settings — fitted with
-`tools/reverb_calibrate.c`, which holds a reference Freeverb (ISC) that never ships: RT60 within
-~1% per roomSize, loudness within +2.3/-0.7 dB. Dry is untouched; `wetLevel` 0 skips it.
-Instrument-level only: a group-level reverb would be a plate per note and stays off. Measured
-on the Move: 7.2 us a block vs Freeverb's 5.9 (per-sample `sinf` had made it 9.4).
+**Reverb** (`reverb.c`) is `juce::Reverb` itself — the reverb DecentSampler runs (confirmed by
+Josh 2026-09-18, not inferred from the matching parameter names) — ported to C from JUCE's ISC
+`juce_Reverb.h` (notice in `THIRD_PARTY.md`, shipped in the package). Same 8 combs + 4
+all-passes per channel, tunings, spread, gains and 10 ms ramps; `test_reverb` holds it to a
+second plain transcription sample by sample. DecentSampler exposes only roomSize / damping /
+wetLevel: width is 1 and dry passes at UNITY — ⚠ DecentSampler's own dry level is the one thing
+not confirmed. Additions: wetLevel 0 skips it once its fade is out (the tail is dropped, where
+JUCE would keep it running unheard), and with no input it stops working once the output has
+stayed under -130 dB longer than any path through the network. Instrument-level only: a
+group-level reverb would be a reverb per note and stays off. (A Dattorro plate was built first
+and replaced; it is in git history, `db54fda`.)
 Delay, chorus, phaser and the rest still pass through.
 
 The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling

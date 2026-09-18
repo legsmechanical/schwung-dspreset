@@ -223,8 +223,8 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
-    /* An instrument-level reverb gets its plate now (the audio thread never
-     * allocates). A GROUP-level one would be a plate per note, as DecentSampler
+    /* An instrument-level reverb gets its buffers now (the audio thread never
+     * allocates). A GROUP-level one would be a reverb per note, as DecentSampler
      * runs it — far too heavy here — so it stays off. */
     for (unsigned x = 0; x < e->model.effect_count; ++x)
         if (!strcmp(e->model.effects[x].type, "reverb") && e->model.effects[x].group < 0 &&

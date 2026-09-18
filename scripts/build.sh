@@ -62,6 +62,7 @@ echo "=== Packaging ==="
 cat src/module.json > dist/dspreset/module.json
 cat build/dsp.so > dist/dspreset/dsp.so
 chmod +x dist/dspreset/dsp.so
+cat THIRD_PARTY.md > dist/dspreset/THIRD_PARTY.md    # the reverb's ISC notice travels with it
 mkdir -p dist/dspreset/instruments
 
 cd dist

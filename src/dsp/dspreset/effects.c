@@ -31,7 +31,9 @@ void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
         c->room = clampf(ds_fx_param(fx, "roomSize", 0.7f), 0, 1);
         c->damping = clampf(ds_fx_param(fx, "damping", 0.3f), 0, 1);
         c->wet = clampf(ds_fx_param(fx, "wetLevel", 0.0f), 0, 1);
-        c->kind = c->wet > 0 ? DS_FX_REVERB : DS_FX_BYPASS;
+        /* at wetLevel 0 the reverb still runs until its 10 ms fade is out;
+         * then it skips itself (reverb.c) */
+        c->kind = DS_FX_REVERB;
         return;
     }
     if (!strcmp(t, "lowpass_1pl")) {
