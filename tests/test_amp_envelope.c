@@ -77,8 +77,9 @@ int main(void) {
     CHECK(first < full * 0.9 && fabs(later - full) < 0.003);
     ds_native_engine_destroy(&e);
 
-    /* Through the plugin: four stepped knobs on their own page, "Preset" first,
-     * reaching the sound, and saved with the project */
+    /* Through the plugin: an Override switch then four NUMERIC knobs, adjacent
+     * and named *_attack.._release (what both hosts draw as an envelope).
+     * Off: the preset plays, and the knobs show ITS envelope. On: they replace it. */
     {
         plugin_t p, q;
         int16_t out[256];
@@ -88,41 +89,61 @@ int main(void) {
         usleep(700000);
         for (int i = 0; i < 300 && plugin_uint(&p, "load_count") == 0; ++i) usleep(10000);
         plugin_get(&p, "chain_params", value, sizeof(value));
-        CHECK(strstr(value, "{\"key\":\"amp_release\",\"name\":\"Release\",\"type\":\"enum\",\"options\":[\"Preset\",\"0 ms\""));
-        CHECK(strstr(value, "{\"key\":\"amp_sustain\",\"name\":\"Sustain\",\"type\":\"enum\",\"options\":[\"Preset\",\"0%\""));
+        CHECK(strstr(value, "{\"key\":\"amp_override\",\"name\":\"Override\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"]"));
+        CHECK(strstr(value, "{\"key\":\"amp_release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":20,\"step\":0.001,\"unit\":\"sec\""));
+        CHECK(strstr(value, "{\"key\":\"amp_sustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"unit\":\"%\""));
         plugin_get(&p, "ui_hierarchy", value, sizeof(value));
         CHECK(strstr(value, "{\"level\":\"amp\",\"label\":\"Amp Envelope\"}"));
-        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\"]"));
-        CHECK(plugin_uint(&p, "amp_release") == 0);
-        p.api->set_param(p.instance, "amp_release", "5 s");        /* by option name, as some hosts send */
-        CHECK(plugin_uint(&p, "amp_release") == 16);
+        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"]"));
+        /* Off by default, knobs mirroring the preset: release 0.05 s, sustain 100% */
+        CHECK(plugin_uint(&p, "amp_override") == 0);
+        plugin_get(&p, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "0.0500"));
+        plugin_get(&p, "amp_sustain", value, sizeof(value)); CHECK(!strcmp(value, "1.0000"));
+        /* a knob turned while Off is kept but not applied: the preset's release still ends the note */
+        p.api->set_param(p.instance, "amp_release", "5");
         clock_gettime(CLOCK_MONOTONIC, &p.next);
         plugin_midi(&p, 0x90, 60, 127);
         for (int b = 0; b < 10; ++b) plugin_render(&p, out);
         plugin_midi(&p, 0x80, 60, 0);
         for (int b = 0; b < 70; ++b) plugin_render(&p, out);
-        CHECK(plugin_uint(&p, "voices") == 1);                  /* the preset alone would be silent by now */
+        CHECK(plugin_uint(&p, "voices") == 0);
+        /* On: the 5 s release applies */
+        p.api->set_param(p.instance, "amp_override", "1");
+        plugin_midi(&p, 0x90, 60, 127);
+        for (int b = 0; b < 10; ++b) plugin_render(&p, out);
+        plugin_midi(&p, 0x80, 60, 0);
+        for (int b = 0; b < 70; ++b) plugin_render(&p, out);
+        CHECK(plugin_uint(&p, "voices") == 1);
         plugin_midi(&p, 0xb0, 120, 0);
         /* turned while a note is held, with no MIDI arriving: it still reaches the note */
         {
             double half = 0, whole = 0;
-            p.api->set_param(p.instance, "amp_sustain", "50%");
+            p.api->set_param(p.instance, "amp_sustain", "0.5");
             plugin_midi(&p, 0x90, 60, 127);
             for (int b = 0; b < 10; ++b) plugin_render(&p, out);
             for (int i = 0; i < 128; ++i) half += (double)out[2 * i] * out[2 * i];
-            p.api->set_param(p.instance, "amp_sustain", "100%");
+            p.api->set_param(p.instance, "amp_sustain", "1");
             for (int b = 0; b < 30; ++b) plugin_render(&p, out);
             for (int i = 0; i < 128; ++i) whole += (double)out[2 * i] * out[2 * i];
             printf("  sustain turned 50%% -> 100%% on a held note: %.0f -> %.0f (rms, int16)\n", sqrt(half / 128), sqrt(whole / 128));
             CHECK(sqrt(whole / half) > 1.9 && sqrt(whole / half) < 2.1);
             plugin_midi(&p, 0x80, 60, 0);
-            p.api->set_param(p.instance, "amp_sustain", "Preset");
+            plugin_midi(&p, 0xb0, 120, 0);
         }
+        /* saved with the project, and restored: switch and values */
         plugin_get(&p, "state", state, sizeof(state));
-        CHECK(strstr(state, "\"amp\":\"0;0;0;16\""));
+        CHECK(strstr(state, "\"amp\":\"1;0;0;1;5\""));
         plugin_open_in(&q, mod);
         q.api->set_param(q.instance, "state", state);
-        CHECK(plugin_uint(&q, "amp_release") == 16);
+        CHECK(plugin_uint(&q, "amp_override") == 1);
+        plugin_get(&q, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "5.0000"));
+        /* Off again: the preset's own envelope comes back */
+        p.api->set_param(p.instance, "amp_override", "0");
+        plugin_midi(&p, 0x90, 60, 127);
+        for (int b = 0; b < 10; ++b) plugin_render(&p, out);
+        plugin_midi(&p, 0x80, 60, 0);
+        for (int b = 0; b < 70; ++b) plugin_render(&p, out);
+        CHECK(plugin_uint(&p, "voices") == 0);
         plugin_close(&q);
         plugin_close(&p);
     }

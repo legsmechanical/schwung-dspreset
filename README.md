@@ -21,8 +21,9 @@ source.
 
 - **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
 
-- **An amp envelope for every preset** on its own page: Attack, Decay, Sustain and Release,
-  each starting at "Preset" (the preset's own value) and replacing it once turned.
+- **An amp envelope for every preset** on its own page, drawn as an envelope: Attack, Decay,
+  Sustain and Release, and an Override switch. Off, they show the preset's own envelope; on,
+  they replace it.
 - **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
   with the preset's knobs setting their depth, rate and times.
 

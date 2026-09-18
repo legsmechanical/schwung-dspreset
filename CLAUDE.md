@@ -99,13 +99,19 @@ The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 
 ## The module's amp envelope (every preset)
 
-An **Amp Envelope** page: `amp_attack` / `amp_decay` / `amp_sustain` / `amp_release`, stepped
-enums whose step 0 is **"Preset"** (the preset's value stands). Any other step REPLACES the
-preset's value — even one a `<sample>` sets itself — so releases can be lengthened as well as
-shortened (Josh, 2026-09-18: override, not a second stage). Ignored by zones with no amp
-envelope. The plugin copies the steps into `engine->amp_override[]` on the audio thread before
-every MIDI call and block; a Sustain moved while a note is held glides there (≥ 20 ms).
-Saved in `state` as `"amp":"a;d;s;r"` step indices.
+An **Amp Envelope** page: Attack / Decay / Sustain / Release as NUMERIC knobs 1–4 (sec, sec,
+%, sec) declared `viz: envelope`, and an **Override** switch on knob 5 (Josh, 2026-09-18: a
+switch, not stepped "Preset" knobs). ⚠ The four MUST sit in one row of the grid: with Override
+on knob 1 they straddled the row break and both hosts drew four faders — every C test was
+green. `tests/test_pages.mjs` lays the pages out with the hosts' own planner
+(`DSPRESET_PAGES_DIR`) and fails if the envelope is not drawn.
+
+Override off: the preset's envelope plays, and after each load the knobs are set to it (from its
+first playable zone), so switching On changes nothing until a knob moves. On: the knobs REPLACE
+the preset's values — even a `<sample>`'s own — so releases can be lengthened. Zones with no amp
+envelope ignore it. Copied into `engine->amp_override[]` on the audio thread before every MIDI
+call and block; a Sustain moved while a note is held glides there (≥ 20 ms). `state` saves
+`"amp":"on;a;d;s;r"`.
 
 ## Modulators
 

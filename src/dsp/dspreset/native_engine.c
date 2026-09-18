@@ -342,6 +342,18 @@ static void control_changed(ds_native_engine_t *e, unsigned index, float value, 
     }
 }
 
+int ds_native_engine_preset_envelope(const ds_native_engine_t *e, float out[4]) {
+    for (unsigned i = 0; e && i < e->zone_count; ++i) {
+        const ds_zone_t *z = &e->zones[i];
+        zone_now_t now;
+        if (z->source < 0 || !z->def.amp_env_enabled || z->def.trigger != DS_TRIGGER_ATTACK) continue;
+        zone_now_from(e, z, &e->groups_rt[z->def.group_index], &e->instrument_rt, &now);
+        for (int k = 0; k < 4; ++k) out[k] = now.env[k];
+        return 1;
+    }
+    return 0;
+}
+
 void ds_native_engine_set_control(ds_native_engine_t *e, unsigned index, float value) {
     if (e && index < e->model.control_count) control_changed(e, index, value, 0);
 }

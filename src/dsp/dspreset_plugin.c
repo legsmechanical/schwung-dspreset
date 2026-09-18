@@ -37,30 +37,15 @@ typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(co
 static const host_api_v1_t *g_host;
 
 /* ---- the module's own amp envelope ---------------------------------------
- * Four stepped knobs. Step 0 is "Preset": the preset's own value stands. Any
- * other step REPLACES it on every preset (Josh, 2026-09-18: override, not a
- * second stage), so a release can be made longer as well as shorter. */
+ * An Override switch and four numeric knobs, adjacent and named *_attack ..
+ * *_release so both hosts' pages draw them as an ENVELOPE. Off: the preset's
+ * own envelope plays, and the knobs are set to it each time a preset loads, so
+ * they show what is playing and switching On changes nothing until one moves.
+ * On: the knobs REPLACE the preset's envelope, on every preset (Josh,
+ * 2026-09-18: a switch on the envelope page, not stepped "Preset" knobs). */
 enum { AMP_ATTACK = 0, AMP_DECAY, AMP_SUSTAIN, AMP_RELEASE };
-typedef struct { const char *label; float value; } amp_step_t;
-static const amp_step_t AMP_TIMES[] = {
-    {"Preset", -1}, {"0 ms", 0}, {"2 ms", 0.002f}, {"5 ms", 0.005f}, {"10 ms", 0.01f}, {"20 ms", 0.02f},
-    {"50 ms", 0.05f}, {"100 ms", 0.1f}, {"200 ms", 0.2f}, {"350 ms", 0.35f}, {"500 ms", 0.5f},
-    {"750 ms", 0.75f}, {"1 s", 1}, {"1.5 s", 1.5f}, {"2 s", 2}, {"3 s", 3}, {"5 s", 5}, {"7.5 s", 7.5f},
-    {"10 s", 10}, {"15 s", 15}, {"20 s", 20}};
-static const amp_step_t AMP_LEVELS[] = {
-    {"Preset", -1}, {"0%", 0}, {"5%", 0.05f}, {"10%", 0.1f}, {"15%", 0.15f}, {"20%", 0.2f}, {"25%", 0.25f},
-    {"30%", 0.3f}, {"35%", 0.35f}, {"40%", 0.4f}, {"45%", 0.45f}, {"50%", 0.5f}, {"55%", 0.55f},
-    {"60%", 0.6f}, {"65%", 0.65f}, {"70%", 0.7f}, {"75%", 0.75f}, {"80%", 0.8f}, {"85%", 0.85f},
-    {"90%", 0.9f}, {"95%", 0.95f}, {"100%", 1}};
 static const char *AMP_KEYS[4] = {"amp_attack", "amp_decay", "amp_sustain", "amp_release"};
-static const char *AMP_NAMES[4] = {"Attack", "Decay", "Sustain", "Release"};
-#define AMP_TIME_STEPS (int)(sizeof(AMP_TIMES) / sizeof(AMP_TIMES[0]))
-#define AMP_LEVEL_STEPS (int)(sizeof(AMP_LEVELS) / sizeof(AMP_LEVELS[0]))
-
-static const amp_step_t *amp_steps(int stage, int *count) {
-    *count = stage == AMP_SUSTAIN ? AMP_LEVEL_STEPS : AMP_TIME_STEPS;
-    return stage == AMP_SUSTAIN ? AMP_LEVELS : AMP_TIMES;
-}
+static const float AMP_MAX[4] = {10, 10, 1, 20};
 
 static int amp_stage_of(const char *key) {
     for (int i = 0; i < 4; ++i) if (!strcmp(key, AMP_KEYS[i])) return i;
@@ -106,7 +91,8 @@ typedef struct {
     _Atomic int unpacking_bank, loading, worker_running;
     _Atomic uint32_t load_count;        /* engines actually built, for tests */
     _Atomic float gain;
-    _Atomic int amp_step[4];            /* the module's amp envelope: 0 = "Preset" */
+    _Atomic int amp_on;                 /* the module's amp envelope: Override */
+    _Atomic float amp_value[4];         /* seconds, seconds, 0..1, seconds */
     seqstr_t request;                   /* preset_path / state from the host */
     seqstr_t request_controls;          /* control positions from a restored state */
     _Atomic uint32_t request_gen;
@@ -256,6 +242,11 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
         in->restore_path[0] = '\0';
     }
     atomic_store(&in->ctl_dirty, 0);
+    if (!atomic_load(&in->amp_on)) {          /* Override off: the knobs show the preset's own envelope */
+        float env[4];
+        if (ds_native_engine_preset_envelope(next, env))
+            for (int i = 0; i < 4; ++i) atomic_store(&in->amp_value[i], env[i] < 0 ? 0 : env[i] > AMP_MAX[i] ? AMP_MAX[i] : env[i]);
+    }
     retire_engine(in, atomic_exchange(&in->active, next));
     atomic_fetch_add(&in->load_count, 1);
     seqstr_write(&in->loaded_path, path);
@@ -373,6 +364,8 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     (void)json_defaults;
     if (!in) return NULL;
     atomic_store(&in->gain, 0.7f);
+    atomic_store(&in->amp_value[AMP_SUSTAIN], 1.0f);
+    atomic_store(&in->amp_value[AMP_RELEASE], 0.5f);
     atomic_store(&in->unpacking_bank, -1);
     atomic_store(&in->sel_bank, NO_BANK);
     snprintf(in->module_dir, sizeof(in->module_dir), "%s", module_dir ? module_dir : ".");
@@ -398,11 +391,9 @@ static void destroy_instance(void *opaque) {
 
 /* The module's envelope into the engine: on the audio thread, the engine's only writer. */
 static void sync_amp(dspreset_instance_t *in, ds_native_engine_t *engine) {
-    for (int i = 0; i < 4; ++i) {
-        int count, step = atomic_load_explicit(&in->amp_step[i], memory_order_relaxed);
-        const amp_step_t *steps = amp_steps(i, &count);
-        engine->amp_override[i] = step > 0 && step < count ? steps[step].value : -1.0f;
-    }
+    int on = atomic_load_explicit(&in->amp_on, memory_order_relaxed);
+    for (int i = 0; i < 4; ++i)
+        engine->amp_override[i] = on ? atomic_load_explicit(&in->amp_value[i], memory_order_relaxed) : -1.0f;
 }
 
 static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
@@ -463,14 +454,12 @@ static void set_param(void *opaque, const char *key, const char *value) {
         if (!c || bank < 0 || bank >= (int)c->bank_count) return;
         if (preset < 0 || preset >= (int)c->banks[bank].preset_count) return;
         if (preset != atomic_load(&in->sel_preset)) { atomic_store(&in->busy, 1); select_bank_preset(in, bank, preset); }
+    } else if (!strcmp(key, "amp_override")) {
+        atomic_store(&in->amp_on, !strcmp(value, "1") || !strcasecmp(value, "On"));
     } else if (amp_stage_of(key) >= 0) {
-        int stage = amp_stage_of(key), count, step;
-        const amp_step_t *steps = amp_steps(stage, &count);
-        char *tail;
-        step = (int)strtol(value, &tail, 10);
-        if (tail == value || *tail)                              /* a host that speaks option names ("5 s") */
-            for (step = 0; step < count && strcmp(steps[step].label, value); ++step) {}
-        if (step >= 0 && step < count) atomic_store(&in->amp_step[stage], step);
+        int stage = amp_stage_of(key);
+        float v = strtof(value, NULL);
+        atomic_store(&in->amp_value[stage], v < 0 ? 0 : v > AMP_MAX[stage] ? AMP_MAX[stage] : v);
     } else if (!strncmp(key, "ctl_", 4)) {
         int i = atoi(key + 4);
         if (i < 0 || i >= DS_MAX_CONTROLS) return;
@@ -484,17 +473,14 @@ static void set_param(void *opaque, const char *key, const char *value) {
         if (json_string(value, "gain", gain, sizeof(gain))) atomic_store(&in->gain, strtof(gain, NULL));
         if (!json_string(value, "controls", controls, sizeof(controls))) controls[0] = '\0';
         {
-            char amp[64];
-            if (json_string(value, "amp", amp, sizeof(amp))) {
-                const char *q = amp;
-                for (int i = 0; i < 4 && *q; ++i) {
-                    char *tail;
-                    int count, step = (int)strtol(q, &tail, 10);
-                    amp_steps(i, &count);
-                    if (tail != q && step >= 0 && step < count) atomic_store(&in->amp_step[i], step);
-                    q = strchr(tail, ';');
-                    if (!q) break;
-                    ++q;
+            char amp[128];
+            if (json_string(value, "amp", amp, sizeof(amp))) {           /* "on;attack;decay;sustain;release" */
+                char *q = amp, *tail;
+                atomic_store(&in->amp_on, strtol(q, &tail, 10) != 0);
+                for (int i = 0; i < 4 && *tail == ';'; ++i) {
+                    float v = strtof(q = tail + 1, &tail);
+                    if (tail == q) break;
+                    atomic_store(&in->amp_value[i], v < 0 ? 0 : v > AMP_MAX[i] ? AMP_MAX[i] : v);
                 }
             }
         }
@@ -532,6 +518,11 @@ static int append(char *out, int k, int n, const char *fmt, ...) {
 
 /* The preset's own controls come first on the knobs, Gain after them: the
  * page you land on plays the preset the way its author laid it out. */
+/* The Amp Envelope page puts Attack..Release on knobs 1-4 — one ROW of the
+ * grid, which is what lets both hosts draw them as an envelope (a graphic
+ * never straddles the row break; with Override first they drew as four
+ * faders) — and Override on knob 5. tests/test_pages.mjs checks it with the
+ * hosts' own planner. */
 static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
     int k = append(out, 0, n, "{\"levels\":{\"root\":{\"name\":\"DSPreset\",\"list_param\":\"preset\","
                    "\"count_param\":\"preset_count\",\"name_param\":\"preset_name\","
@@ -542,8 +533,8 @@ static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
     for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "\"ctl_%u\",", i);
     return append(out, k, n, "\"gain\"]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
                   "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"},"
-                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\"],"
-                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\"]}}}");
+                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"],"
+                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\"]}}}");
 }
 
 static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsigned presets, char *out, int n) {
@@ -551,13 +542,15 @@ static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsig
                    "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
                    "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}",
                    presets ? presets - 1 : 0, banks ? banks - 1 : 0);
-    for (int stage = 0; stage < 4; ++stage) {
-        int count;
-        const amp_step_t *steps = amp_steps(stage, &count);
-        k = append(out, k, n, ",{\"key\":\"%s\",\"name\":\"%s\",\"type\":\"enum\",\"options\":[", AMP_KEYS[stage], AMP_NAMES[stage]);
-        for (int o = 0; o < count; ++o) k = append(out, k, n, "%s\"%s\"", o ? "," : "", steps[o].label);
-        k = append(out, k, n, "],\"default\":0}");
-    }
+    k = append(out, k, n, ",{\"key\":\"amp_override\",\"name\":\"Override\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0}"
+                   ",{\"key\":\"amp_attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":10,\"step\":0.001,\"unit\":\"sec\",\"default\":0,"
+                   "\"viz\":{\"kind\":\"envelope\",\"group\":\"amp_env\",\"role\":\"attack\"}}"
+                   ",{\"key\":\"amp_decay\",\"name\":\"Decay\",\"type\":\"float\",\"min\":0,\"max\":10,\"step\":0.001,\"unit\":\"sec\",\"default\":0,"
+                   "\"viz\":{\"kind\":\"envelope\",\"group\":\"amp_env\",\"role\":\"decay\"}}"
+                   ",{\"key\":\"amp_sustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"unit\":\"%%\",\"default\":1,"
+                   "\"viz\":{\"kind\":\"envelope\",\"group\":\"amp_env\",\"role\":\"sustain\"}}"
+                   ",{\"key\":\"amp_release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":20,\"step\":0.001,\"unit\":\"sec\",\"default\":0.5,"
+                   "\"viz\":{\"kind\":\"envelope\",\"group\":\"amp_env\",\"role\":\"release\"}}");
     for (unsigned i = 0; e && i < e->model.control_count; ++i) {
         const ds_control_t *c = &e->model.controls[i];
         char name[80];
@@ -609,8 +602,9 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
                        (double)atomic_load(&in->gain));
             for (unsigned i = 0; engine && i < engine->model.control_count; ++i)
                 k = append(out, k, out_len, "%s%g", i ? ";" : "", (double)engine->control_value[i]);
-            k = append(out, k, out_len, "\",\"amp\":\"%d;%d;%d;%d\"}", atomic_load(&in->amp_step[0]), atomic_load(&in->amp_step[1]),
-                       atomic_load(&in->amp_step[2]), atomic_load(&in->amp_step[3]));
+            k = append(out, k, out_len, "\",\"amp\":\"%d;%g;%g;%g;%g\"}", atomic_load(&in->amp_on),
+                       (double)atomic_load(&in->amp_value[0]), (double)atomic_load(&in->amp_value[1]),
+                       (double)atomic_load(&in->amp_value[2]), (double)atomic_load(&in->amp_value[3]));
         } else {
             unsigned i = (unsigned)atoi(key + 4);
             if (engine && i < engine->model.control_count) {
@@ -622,7 +616,8 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
         atomic_fetch_sub(&in->audio_users, 1);
         return k;
     }
-    if (amp_stage_of(key) >= 0) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->amp_step[amp_stage_of(key)])), out_len);
+    if (!strcmp(key, "amp_override")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->amp_on)), out_len);
+    if (amp_stage_of(key) >= 0) return finish(snprintf(out, (size_t)out_len, "%.4f", (double)atomic_load(&in->amp_value[amp_stage_of(key)])), out_len);
     if (!strcmp(key, "is_loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->busy) ? 1 : 0), out_len);
     if (!strcmp(key, "bank_list")) {
         int k = snprintf(out, (size_t)out_len, "[");

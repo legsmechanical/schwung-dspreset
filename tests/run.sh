@@ -6,6 +6,8 @@
 #   DSPRESET_CAPTURE=/path/Capture GO-TO Bass.dspreset
 #   DSPRESET_ASIMOV_DIR=/path/ASIMOV v1.0          (folder of 15 .dspreset)
 #   DSPRESET_CS20M_BUNDLE=/path/Yamaha CS-20M.dsbundle  (21 presets, one on AIFF)
+#   DSPRESET_PAGES_DIR=/path/dbxhost/src/shared/param_pages  (the hosts' page planner, + node;
+#                                         it imports ../param_format.mjs, so all of src/shared must be there)
 # A missing fixture FAILS the run. DSPRESET_ALLOW_MISSING_FIXTURES=1 turns that
 # into a named SKIP, which is reported beside the count.
 set -u
@@ -70,6 +72,15 @@ for t in $tests; do
             run "$name" "$BUILD/$name" "$ARCHIVE" "$BUILD/archive/out-$name"; continue ;;
     esac
     run "$name" "$BUILD/$name"
+    if [ "$name" = test_pages_contract ]; then
+        # the layout a user sees, from the hosts' own planner
+        if [ ! -f "${DSPRESET_PAGES_DIR:-}/page_plan.mjs" ] || ! command -v node >/dev/null; then
+            if [ "${DSPRESET_ALLOW_MISSING_FIXTURES:-}" = 1 ]; then skipped+=("test_pages (needs node + DSPRESET_PAGES_DIR)")
+            else echo "FAILED: test_pages needs node and DSPRESET_PAGES_DIR (or DSPRESET_ALLOW_MISSING_FIXTURES=1)"; fail=$((fail + 1)); fi
+        else
+            run test_pages node tests/test_pages.mjs "$DSPRESET_PAGES_DIR" "$TEST_TMP/contract.json"
+        fi
+    fi
 done
 
 echo

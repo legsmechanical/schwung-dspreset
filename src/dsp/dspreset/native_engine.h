@@ -152,6 +152,10 @@ void ds_native_engine_pitch_bend(ds_native_engine_t *engine, int value14);
 /* A preset control moved: stores it and fires its bindings. Audio thread (or
  * the worker before the engine is published). Buttons/menus take an index. */
 void ds_native_engine_set_control(ds_native_engine_t *engine, unsigned index, float value);
+/* The amp envelope the preset itself gives its first playable zone (attack,
+ * decay, sustain, release), ignoring the module's override. Returns 0 if the
+ * preset has no zone with an amp envelope. */
+int ds_native_engine_preset_envelope(const ds_native_engine_t *engine, float out[4]);
 void ds_native_engine_render(ds_native_engine_t *engine, float *out_lr, unsigned frames);
 unsigned ds_native_engine_active_voices(const ds_native_engine_t *engine);
 
