@@ -68,6 +68,20 @@ why a sample is resident.
 - Cache creation and eviction are background/off-device work. A bounded cache
   budget must evict only derived files, never user assets.
 
+## `.dslibrary` packages
+
+A `.dslibrary` is a ZIP container around an ordinary `.dspreset` and its
+relative assets. The loader accepts a directory, a standalone `.dspreset`, or
+a `.dslibrary` as three library roots. It selects the package's DSPreset and
+resolves every asset path from the preset's directory inside the package.
+
+Archive names are untrusted: extraction/indexing rejects absolute paths,
+traversal, empty segments, and `__MACOSX` resource-fork entries. Stored WAV
+entries can be exposed to the streamed-source layer by their archive offsets;
+compressed entries are materialized once into the module's disposable cache,
+never beside or in place of the user's package. The loaded Capture GO-TO Bass
+package is the fixture for this contract.
+
 ## First vertical slice
 
 1. Parse the root, `groups`, `group`, `sample`, and `binding` elements with
