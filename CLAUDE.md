@@ -100,7 +100,8 @@ disabled effect are exact pass-throughs. Instrument effects run on the mix; grou
 inside each note with fresh state, as DecentSampler does.
 
 **Reverb** (`reverb.c`) is a Dattorro plate written from the 1997 paper, not DecentSampler's
-own JUCE Freeverb. `roomSize` / `damping` / `wetLevel` are MAPPED so the plate rings as long,
+own JUCE Freeverb (`juce::Reverb` — confirmed by Josh 2026-09-18, not inferred from
+the matching parameter names). `roomSize` / `damping` / `wetLevel` are MAPPED so the plate rings as long,
 darkens as fast and sits as loud as JUCE's Freeverb at the same settings — fitted with
 `tools/reverb_calibrate.c`, which holds a reference Freeverb (ISC) that never ships: RT60 within
 ~1% per roomSize, loudness within +2.3/-0.7 dB. Dry is untouched; `wetLevel` 0 skips it.
