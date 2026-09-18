@@ -30,6 +30,7 @@ typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(co
 /* A new instance waits this long for a restored state before choosing a first
  * preset itself, so a project reopening never loads something it then drops. */
 #define FIRST_PICK_MS 500
+#define PERF_REPORT_MS 5000
 #define NO_BANK (-2)                    /* nothing chosen yet */
 #define FILE_BANK (-1)                  /* a file outside the catalog */
 
@@ -82,6 +83,10 @@ typedef struct {
      * live settings have one writer). Dropped when a new preset is swapped in. */
     _Atomic float ctl_pending[DS_MAX_CONTROLS];
     _Atomic uint64_t ctl_dirty;
+    /* Render cost, as measured ON the device: summed by the audio thread,
+     * reported and reset by the worker every PERF_REPORT_MS while notes play. */
+    _Atomic uint64_t perf_ns_sum, perf_ns_max;
+    _Atomic uint32_t perf_blocks, perf_voices_max;
     seqstr_t status, loaded_path;
     pthread_t worker;
     char module_dir[512], instruments[600];
@@ -269,7 +274,7 @@ static void take_request(dspreset_instance_t *in, uint32_t *settled_gen) {
 static void *engine_worker(void *opaque) {
     dspreset_instance_t *in = opaque;
     uint32_t seen_gen = UINT32_MAX, seen_request = 0, settled_gen = UINT32_MAX, failed_gen = UINT32_MAX;
-    uint64_t changed_at = 0, scanned_at = 0, started_at;
+    uint64_t changed_at = 0, scanned_at = 0, started_at, perf_at = 0;
     int first_pick_done = 0;
     rescan(in);
     scanned_at = started_at = now_ms();
@@ -311,6 +316,18 @@ static void *engine_worker(void *opaque) {
             atomic_store(&in->busy, 0);
         }
         if (t - scanned_at >= RESCAN_MS) { rescan(in); scanned_at = t; }
+        if (t - perf_at >= PERF_REPORT_MS) {
+            uint32_t blocks = atomic_exchange(&in->perf_blocks, 0), voices = atomic_exchange(&in->perf_voices_max, 0);
+            uint64_t sum = atomic_exchange(&in->perf_ns_sum, 0), max = atomic_exchange(&in->perf_ns_max, 0);
+            ds_native_engine_t *e = atomic_load(&in->active);
+            perf_at = t;
+            if (blocks && voices) {
+                char line[200];
+                snprintf(line, sizeof(line), "perf: %u blocks, render mean %.1f us, max %.1f us, voices max %u, underruns %u",
+                         blocks, sum / 1000.0 / blocks, max / 1000.0, voices, e ? atomic_load(&e->underruns) : 0);
+                log_line(line);
+            }
+        }
         engine = atomic_load(&in->active);
         if (!engine || !ds_native_engine_service(engine)) usleep(1000);
     }
@@ -598,8 +615,10 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     dspreset_instance_t *in = opaque;
     ds_native_engine_t *engine;
     float buffer[2 * 256], gain;
+    struct timespec t0, t1;
     if (!in || !out || frames <= 0) return;
     if (frames > 256) frames = 256;
+    clock_gettime(CLOCK_MONOTONIC, &t0);             /* vDSO: no syscall, safe here */
     memset(buffer, 0, (size_t)frames * 2 * sizeof(float));
     atomic_fetch_add(&in->audio_users, 1);
     engine = atomic_load(&in->active);
@@ -608,10 +627,23 @@ static void render_block(void *opaque, int16_t *out, int frames) {
         for (unsigned i = 0; dirty; ++i, dirty >>= 1)
             if (dirty & 1) ds_native_engine_set_control(engine, i, atomic_load(&in->ctl_pending[i]));
         ds_native_engine_render(engine, buffer, (unsigned)frames);
+        {
+            unsigned voices = ds_native_engine_active_voices(engine);
+            if (voices > atomic_load_explicit(&in->perf_voices_max, memory_order_relaxed))
+                atomic_store_explicit(&in->perf_voices_max, voices, memory_order_relaxed);
+        }
     }
     atomic_fetch_sub(&in->audio_users, 1);
     gain = atomic_load(&in->gain);
     for (int i = 0; i < frames * 2; ++i) out[i] = (int16_t)(soft_clip(buffer[i] * gain) * 32767);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    {
+        uint64_t ns = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+        atomic_fetch_add_explicit(&in->perf_ns_sum, ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&in->perf_blocks, 1, memory_order_relaxed);
+        if (ns > atomic_load_explicit(&in->perf_ns_max, memory_order_relaxed))
+            atomic_store_explicit(&in->perf_ns_max, ns, memory_order_relaxed);
+    }
 }
 
 static plugin_api_v2_t g_plugin_api_v2 = {
