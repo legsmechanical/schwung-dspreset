@@ -87,6 +87,11 @@ installer may perform the same preparation as an optimization, but it is not a
 compatibility requirement. The loaded Capture GO-TO Bass package is the fixture
 for this contract.
 
+The importer moves through `scanning`, `extracting`, and `validating` before a
+single atomic rename publishes `ready`. A failed or interrupted extraction is
+discarded and never appears in the preset browser. Retrying begins a new import
+from the untouched archive.
+
 ## First vertical slice
 
 1. Parse the root, `groups`, `group`, `sample`, and `binding` elements with
