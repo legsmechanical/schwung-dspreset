@@ -2,6 +2,7 @@
 #define DSPRESET_NATIVE_ENGINE_H
 
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "dspreset_parser.h"
@@ -163,6 +164,11 @@ void ds_native_engine_set_control(ds_native_engine_t *engine, unsigned index, fl
  * decay, sustain, release), ignoring the module's override. Returns 0 if the
  * preset has no zone with an amp envelope. */
 int ds_native_engine_preset_envelope(const ds_native_engine_t *engine, float out[4]);
+
+/* `path` as it exists on disk, matching each component case-insensitively
+ * when the name as written is not there (presets made on case-insensitive
+ * Mac/PC filesystems). 0 on success. Worker only: reads directories. */
+int ds_resolve_path_case(const char *path, char *out, size_t out_len);
 void ds_native_engine_render(ds_native_engine_t *engine, float *out_lr, unsigned frames);
 unsigned ds_native_engine_active_voices(const ds_native_engine_t *engine);
 

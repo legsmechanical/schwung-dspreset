@@ -1,7 +1,10 @@
 #include "native_engine.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <math.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +49,51 @@ static int collect_zone(const ds_dspreset_sample_t *sample, void *opaque) {
     return 0;
 }
 
+/* A path as a preset writes it may differ in CASE from the files: made on a
+ * Mac or PC, where names are case-insensitive, it plays in DecentSampler and
+ * finds nothing on the Move's Linux (BassForge: "samples/…" against a
+ * "Samples" folder). Resolve it one component at a time, matching each
+ * directory entry case-insensitively; an exact name is kept as it is.
+ * Returns 0 and the path as it exists on disk, or -1. Worker only. */
+int ds_resolve_path_case(const char *path, char *out, size_t out_len) {
+    char built[1600];
+    const char *p = path;
+    size_t len = 0;
+    built[0] = '\0';
+    if (*p == '/') { built[0] = '/'; built[1] = '\0'; len = 1; while (*p == '/') ++p; }
+    while (*p) {
+        char part[256];
+        size_t n = 0;
+        struct stat st;
+        while (*p && *p != '/' && n + 1 < sizeof(part)) part[n++] = *p++;
+        part[n] = '\0';
+        while (*p == '/') ++p;
+        if (!strcmp(part, ".") || !n) continue;
+        if (len + n + 2 >= sizeof(built)) return -1;
+        snprintf(built + len, sizeof(built) - len, "%s%s", len && built[len - 1] != '/' ? "/" : "", part);
+        if (!stat(built, &st)) { len = strlen(built); continue; }
+        {   /* not as written: find it ignoring case */
+            DIR *dir;
+            struct dirent *entry;
+            int found = 0;
+            built[len] = '\0';
+            dir = opendir(len ? built : ".");
+            if (!dir) return -1;
+            while ((entry = readdir(dir)) != NULL)
+                if (!strcasecmp(entry->d_name, part)) {
+                    snprintf(built + len, sizeof(built) - len, "%s%s", len && built[len - 1] != '/' ? "/" : "", entry->d_name);
+                    found = 1;
+                    break;
+                }
+            closedir(dir);
+            if (!found) return -1;
+            len = strlen(built);
+        }
+    }
+    if (snprintf(out, out_len, "%s", built) >= (int)out_len) return -1;
+    return 0;
+}
+
 static int source_for(ds_native_engine_t *e, const char *path) {
     ds_source_t *s;
     char error[128];
@@ -54,7 +102,14 @@ static int source_for(ds_native_engine_t *e, const char *path) {
     s = &e->sources[e->source_count];
     snprintf(e->source_paths[e->source_count], sizeof(e->source_paths[0]), "%s", path);
     e->source_count++;
-    if (ds_wav_source_open(&s->file, path, error, sizeof(error)) ||
+    if (ds_wav_source_open(&s->file, path, error, sizeof(error))) {
+        char actual[1600];
+        /* the worker reopens this path to stream, so keep the one that exists */
+        if (!ds_resolve_path_case(path, actual, sizeof(actual)) && strcmp(actual, path) &&
+            !ds_wav_source_open(&s->file, actual, error, sizeof(error)))
+            snprintf(e->source_paths[e->source_count - 1], sizeof(e->source_paths[0]), "%s", actual);
+    }
+    if (s->file.fd < 0 ||
         s->file.channels > 2 || !s->file.frame_count) {
         ds_wav_source_close(&s->file);
         s->file.frame_count = 0;

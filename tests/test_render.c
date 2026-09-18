@@ -4,6 +4,8 @@
  * loop wraps. */
 #include "test_support.h"
 
+#include "../src/dsp/dspreset/native_engine.h"
+
 #define BLOCK 128
 #define GAIN 0.7f
 
@@ -130,6 +132,33 @@ int main(void) {
         p.api->set_param(p.instance, "gain", "0.7");
         printf("  soft clip: %d samples over 0.9 bent, none squared off\n", bent);
         CHECK(bent > 100);
+    }
+
+    /* E3: a preset made on a Mac/PC names "samples/..." while the folder is
+     * "Samples" (BassForge does): case-insensitive there, NOT on the Move's
+     * Linux. Found anyway, streamed from the path as it really is. Only a
+     * case-sensitive filesystem can fail this - which is why the suite runs
+     * on Linux too. */
+    {
+        char cased[1024], resolved[1600];
+        snprintf(cmd, sizeof(cmd), "mkdir -p '%s/cased/Samples/Sub'", dir); CHECK(system(cmd) == 0);
+        snprintf(cased, sizeof(cased), "%s/cased/Samples/Sub/Long.wav", dir); write_wav24(cased, 44100, 1, 200000, -1, -1);
+        snprintf(cased, sizeof(cased), "%s/cased/p.dspreset", dir);
+        write_text(cased, "<DecentSampler><groups attack=\"0\"><group><sample path=\"samples/sub/long.WAV\" rootNote=\"60\"/>"
+                          "</group></groups></DecentSampler>");
+        snprintf(cased, sizeof(cased), "%s/cased/samples/sub/long.WAV", dir);
+        CHECK(ds_resolve_path_case(cased, resolved, sizeof(resolved)) == 0);
+        {   FILE *f = fopen(resolved, "rb"); CHECK(f); fclose(f); }
+        snprintf(cased, sizeof(cased), "%s/cased/samples/sub/nope.wav", dir);
+        CHECK(ds_resolve_path_case(cased, resolved, sizeof(resolved)) != 0);
+        snprintf(cased, sizeof(cased), "%s/cased/p.dspreset", dir);
+        plugin_load(&p, cased, status, sizeof(status));
+        printf("  status: %s\n", status);
+        CHECK(!strcmp(status, "p.dspreset: 1 zones"));
+        note(&p, 1, 60);
+        render_and_compare(&p, 1.0, expect_long, 1, "case-mismatched path, streamed");
+        note(&p, 0, 60);
+        wait_silent(&p);
     }
 
     /* F: a .dslibrary loads its natural-order FIRST preset ("2" before "10") */

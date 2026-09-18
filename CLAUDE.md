@@ -36,6 +36,12 @@ that tree is still here and is **not built** — see *Vestigial* below.
 - **The stream word** (`generation | zone | produced`, one 64-bit atomic) is how the worker and
   the audio thread agree. The worker publishes with a CAS, so a fill for a voice that was
   restarted meanwhile is discarded.
+- **Case in sample paths:** presets are made on case-insensitive Mac/PC filesystems and the
+  Move's is not — BassForge names `samples/…` against a `Samples` folder and loaded nothing.
+  A path that fails to open as written is resolved component by component, case-insensitively
+  (`ds_resolve_path_case`), and the worker streams from the path as it really is. Only a
+  case-sensitive filesystem can test it: `test_render` E3 has teeth on Linux, not on the Mac.
+- **Errors are shown:** stock displays a module's `get_error` as a "Synth Warning" box on load.
 - **File descriptors:** files are closed once their head is read; the worker reopens one per
   streaming voice (≤ 64). The Move host process's soft limit is **1024**, shared with everything
   else — a library of 540 files kept open broke it. `test_real_libraries` pins the count.
