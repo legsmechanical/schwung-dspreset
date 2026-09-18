@@ -21,6 +21,7 @@ that tree is still here and is **not built** — see *Vestigial* below.
 | `src/dsp/dspreset/dspreset_parser.c` | XML → zones. `<groups>` → `<group>` → `<sample>` inheritance; volumes multiply, `groupTuning` adds; whitespace around `=`, entities and comments are handled. |
 | `src/dsp/dspreset/native_engine.c` | Zones, resident heads, per-voice stream rings, envelopes, round robin, render. |
 | `src/dsp/dspreset/catalog.c` | The Banks list: each top-level folder / `.dslibrary` / loose `.dspreset` under `<module>/instruments/`, its presets in natural order. |
+| `src/dsp/dspreset/preset_model.c` | Everything a user can change: the group table, tags, `<ui>` controls (knob / button / menu) and their `<binding>`s, `<midi>` CC maps, the `<effects>` list. Control labels fall back to what the control drives. |
 | `src/dsp/dspreset/wav_source.c` | WAV reader (PCM16/24/32, float32, EXTENSIBLE), block `pread`s, the file's own `smpl` loop. |
 | `src/dsp/dspreset/{library_*,zip_*}.c` | `.dslibrary` → `<file>.dslibrary.unpacked/`, transactionally. |
 
@@ -60,6 +61,27 @@ jog-click picker's "DSPreset Presets" row.
   cross via seqlocks; the catalog is published whole and old ones live until destroy.
 - `preset_path` still loads any file directly (a bank of its own, "File").
 
+## Preset controls (step 1 of 3: effects are next)
+
+Each `<ui>` knob, button and menu is a param `ctl_N` (float/int, or enum of its state/option
+names), listed first on the root knobs, Gain last. Moving one fires its bindings through their
+translation (linear with output range, `table` — the knob position scales the table's key axis,
+the old converter's reading — or `fixed_value`, then `factor`).
+
+- **Live settings:** the engine keeps runtime copies of every group and of the instrument. A
+  zone takes each setting from its own `<sample>` if it sets it (`own_mask`), else its group's
+  live value, else the instrument's. Volume, pan and pitch are re-read every block, so a knob
+  moves notes already sounding; the envelope applies to new notes, release at note-off.
+- **Layers:** disabled groups load (silent until enabled); `ENABLED` / `TAG_ENABLED` gate new
+  notes. Tags are per sample (sample ∪ group tags), up to 64.
+- **One writer:** control moves from `set_param` are queued and applied on the audio thread in
+  `render_block`; MIDI CC maps run in `on_midi`. The worker applies defaults (and restored
+  values) BEFORE publishing an engine.
+- **`is_loading`** is 1 from a pick until it plays: both hosts' module pages re-read the
+  (per-preset) params on its falling edge.
+- `state` adds `"controls":"v0;v1;…"`, applied only when restoring that same preset.
+- Effect bindings already land on `model.effects[i]` params; nothing renders them yet.
+
 ## Defaults DecentSampler does not document
 
 Release 0.5 s when a preset sets none (the old Multisampler's finding: a near-zero release cuts
@@ -68,7 +90,9 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 
 ## Not implemented yet
 
-Effects (`<effects>`), `<ui>` knob/button bindings, `<modulators>`, tags/`silencedByTags`, loop
+Effects DSP (step 2: filters/EQ/gain; step 3: reverb/delay/chorus — reuse a permissively
+licensed fleet module, never `schwung-drumverb`), `<modulators>`, `silencedByTags`, xy-pads,
+SAMPLE_START/LOOP bindings, per-sample-tag bindings, loop
 crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers. There is no read-only param type, so load status is logged
 (`dspreset: loaded …` / `load failed …`) and served as the `status` get_param key, not shown.
 

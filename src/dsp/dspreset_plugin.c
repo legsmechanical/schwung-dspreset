@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -73,13 +74,20 @@ typedef struct {
     _Atomic uint32_t load_count;        /* engines actually built, for tests */
     _Atomic float gain;
     seqstr_t request;                   /* preset_path / state from the host */
+    seqstr_t request_controls;          /* control positions from a restored state */
     _Atomic uint32_t request_gen;
+    _Atomic int busy;                   /* the module's is_loading: a pick not yet playing */
+    /* Control moves from the host, drained on the audio thread (the engine's
+     * live settings have one writer). Dropped when a new preset is swapped in. */
+    _Atomic float ctl_pending[DS_MAX_CONTROLS];
+    _Atomic uint64_t ctl_dirty;
     seqstr_t status, loaded_path;
     pthread_t worker;
     char module_dir[512], instruments[600];
     /* worker only */
     retired_t *retired;
     char direct_path[1024];
+    char restore_path[1024], restore_controls[1024];
 } dspreset_instance_t;
 
 static uint64_t now_ms(void) {
@@ -196,6 +204,20 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
                  next->zone_count - next->missing_zones, next->zone_count, next->missing_files);
     else
         snprintf(status, sizeof(status), "%s: %u zones", name, next->zone_count);
+    if (in->restore_path[0] && !strcmp(in->restore_path, path)) {
+        /* A restored project: put its controls back before anyone hears it. */
+        const char *q = in->restore_controls;
+        for (unsigned i = 0; i < next->model.control_count && *q; ++i) {
+            char *tail;
+            float v = strtof(q, &tail);
+            if (tail != q) ds_native_engine_set_control(next, i, v);
+            q = strchr(tail, ';');
+            if (!q) break;
+            ++q;
+        }
+        in->restore_path[0] = '\0';
+    }
+    atomic_store(&in->ctl_dirty, 0);
     retire_engine(in, atomic_exchange(&in->active, next));
     atomic_fetch_add(&in->load_count, 1);
     seqstr_write(&in->loaded_path, path);
@@ -213,6 +235,8 @@ static void take_request(dspreset_instance_t *in, uint32_t *settled_gen) {
     ds_catalog_t *c;
     seqstr_read(&in->request, path, sizeof(path));
     if (!path[0]) return;
+    snprintf(in->restore_path, sizeof(in->restore_path), "%s", path);
+    seqstr_read(&in->request_controls, in->restore_controls, sizeof(in->restore_controls));
     c = atomic_load(&in->catalog);
     if (!c || ds_catalog_find(c, path, &bank, &preset)) {
         /* An unpacked preset under a .dslibrary's folder may be newer than the scan. */
@@ -230,6 +254,7 @@ static void take_request(dspreset_instance_t *in, uint32_t *settled_gen) {
             struct stat st;
             snprintf(unpacked, sizeof(unpacked), "%s.unpacked", path);
             if (stat(unpacked, &st) && unpack_bank(in, path, FILE_BANK)) return;
+            in->restore_path[0] = '\0';         /* its controls belonged to no preset in particular */
             if (ds_catalog_first_preset(unpacked, in->direct_path, sizeof(in->direct_path))) {
                 seqstr_write(&in->status, "Error: DSLibrary has no DSPreset");
                 return;
@@ -277,6 +302,12 @@ static void *engine_worker(void *opaque) {
                 if (rc && rc != DS_LOAD_CANCELLED) failed_gen = gen;
                 continue;
             }
+            /* Nothing left to do for this pick: the ready edge the host's
+             * pages wait for before re-reading this preset's controls. */
+            if (atomic_load(&in->sel_gen) == gen && atomic_load(&in->request_gen) == seen_request)
+                atomic_store(&in->busy, 0);
+        } else if (failed_gen == gen && atomic_load(&in->request_gen) == seen_request) {
+            atomic_store(&in->busy, 0);
         }
         if (t - scanned_at >= RESCAN_MS) { rescan(in); scanned_at = t; }
         engine = atomic_load(&in->active);
@@ -335,6 +366,7 @@ static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
 }
 
 static void request_path(dspreset_instance_t *in, const char *path) {
+    atomic_store(&in->busy, 1);
     seqstr_write(&in->request, path);
     atomic_fetch_add(&in->request_gen, 1);
 }
@@ -365,17 +397,25 @@ static void set_param(void *opaque, const char *key, const char *value) {
     if (!strcmp(key, "bank")) {
         int bank = atoi(value);
         if (!c || bank < 0 || bank >= (int)c->bank_count) return;
-        if (bank != atomic_load(&in->sel_bank)) select_bank_preset(in, bank, 0);
+        if (bank != atomic_load(&in->sel_bank)) { atomic_store(&in->busy, 1); select_bank_preset(in, bank, 0); }
     } else if (!strcmp(key, "preset")) {
         int bank = atomic_load(&in->sel_bank), preset = atoi(value);
         if (!c || bank < 0 || bank >= (int)c->bank_count) return;
         if (preset < 0 || preset >= (int)c->banks[bank].preset_count) return;
-        if (preset != atomic_load(&in->sel_preset)) select_bank_preset(in, bank, preset);
+        if (preset != atomic_load(&in->sel_preset)) { atomic_store(&in->busy, 1); select_bank_preset(in, bank, preset); }
+    } else if (!strncmp(key, "ctl_", 4)) {
+        int i = atoi(key + 4);
+        if (i < 0 || i >= DS_MAX_CONTROLS) return;
+        atomic_store(&in->ctl_pending[i], strtof(value, NULL));
+        atomic_fetch_or(&in->ctl_dirty, 1ull << i);
     } else if (!strcmp(key, "preset_path")) {
+        seqstr_write(&in->request_controls, "");
         request_path(in, value);
     } else if (!strcmp(key, "state")) {
-        char path[1024], gain[32];
+        char path[1024], gain[32], controls[1024];
         if (json_string(value, "gain", gain, sizeof(gain))) atomic_store(&in->gain, strtof(gain, NULL));
+        if (!json_string(value, "controls", controls, sizeof(controls))) controls[0] = '\0';
+        seqstr_write(&in->request_controls, controls);
         if (json_string(value, "preset_path", path, sizeof(path)) && path[0]) request_path(in, path);
     } else if (!strcmp(key, "gain")) {
         atomic_store(&in->gain, strtof(value, NULL));
@@ -395,14 +435,60 @@ static int json_escape(char *out, int n, const char *text) {
 
 static int finish(int n, int out_len) { return n < 0 ? -1 : n < out_len ? n : out_len - 1; }
 
-static const char *UI_HIERARCHY =
-    "{\"levels\":{"
-    "\"root\":{\"name\":\"DSPreset\",\"list_param\":\"preset\",\"count_param\":\"preset_count\","
-    "\"name_param\":\"preset_name\","
-    "\"params\":[{\"level\":\"banks\",\"label\":\"Banks\"},{\"key\":\"gain\",\"name\":\"Gain\"}],"
-    "\"knobs\":[\"gain\"]},"
-    "\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\",\"items_param\":\"bank_list\","
-    "\"select_param\":\"bank\",\"navigate_to\":\"root\"}}}";
+/* Appends to out[k..n); returns the new length, never past n-1. */
+static int append(char *out, int k, int n, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static int append(char *out, int k, int n, const char *fmt, ...) {
+    va_list ap;
+    int w;
+    if (k >= n - 1) return k;
+    va_start(ap, fmt);
+    w = vsnprintf(out + k, (size_t)(n - k), fmt, ap);
+    va_end(ap);
+    return w < 0 ? k : (k + w < n ? k + w : n - 1);
+}
+
+/* The preset's own controls come first on the knobs, Gain after them: the
+ * page you land on plays the preset the way its author laid it out. */
+static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
+    int k = append(out, 0, n, "{\"levels\":{\"root\":{\"name\":\"DSPreset\",\"list_param\":\"preset\","
+                   "\"count_param\":\"preset_count\",\"name_param\":\"preset_name\","
+                   "\"params\":[{\"level\":\"banks\",\"label\":\"Banks\"}");
+    unsigned controls = e ? e->model.control_count : 0;
+    for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, ",\"ctl_%u\"", i);
+    k = append(out, k, n, ",\"gain\"],\"knobs\":[");
+    for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "\"ctl_%u\",", i);
+    return append(out, k, n, "\"gain\"]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
+                  "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"}}}");
+}
+
+static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsigned presets, char *out, int n) {
+    int k = append(out, 0, n, "[{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":%u},"
+                   "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
+                   "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}",
+                   presets ? presets - 1 : 0, banks ? banks - 1 : 0);
+    for (unsigned i = 0; e && i < e->model.control_count; ++i) {
+        const ds_control_t *c = &e->model.controls[i];
+        char name[80];
+        json_escape(name, sizeof(name), c->name);
+        if (c->kind == DS_CONTROL_KNOB && !c->integer) {
+            k = append(out, k, n, ",{\"key\":\"ctl_%u\",\"name\":\"%s\",\"type\":\"float\",\"min\":%g,\"max\":%g,"
+                       "\"step\":%g,\"default\":%g}", i, name, (double)c->min, (double)c->max,
+                       (double)((c->max - c->min) / 100.0f), (double)c->def);
+        } else if (c->kind == DS_CONTROL_KNOB) {
+            k = append(out, k, n, ",{\"key\":\"ctl_%u\",\"name\":\"%s\",\"type\":\"int\",\"min\":%g,\"max\":%g,\"default\":%g}",
+                       i, name, (double)c->min, (double)c->max, (double)c->def);
+        } else {
+            k = append(out, k, n, ",{\"key\":\"ctl_%u\",\"name\":\"%s\",\"type\":\"enum\",\"options\":[", i, name);
+            for (unsigned o = 0; o < c->choice_count; ++o) {
+                char option[80];
+                json_escape(option, sizeof(option), e->model.choices[c->first_choice + o].name);
+                k = append(out, k, n, "%s\"%s\"", o ? "," : "", option);
+            }
+            k = append(out, k, n, "],\"default\":%d}", (int)c->def);
+        }
+    }
+    return append(out, k, n, "]");
+}
 
 static int get_param(void *opaque, const char *key, char *out, int out_len) {
     dspreset_instance_t *in = opaque;
@@ -415,15 +501,35 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
     preset = atomic_load(&in->sel_preset);
     b = (c && bank >= 0 && bank < (int)c->bank_count) ? &c->banks[bank] : NULL;
 
-    if (!strcmp(key, "ui_hierarchy")) return finish(snprintf(out, (size_t)out_len, "%s", UI_HIERARCHY), out_len);
-    if (!strcmp(key, "chain_params")) {
-        unsigned banks = c ? c->bank_count : 0, presets = b ? b->preset_count : 0;
-        return finish(snprintf(out, (size_t)out_len,
-            "[{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":%u},"
-            "{\"key\":\"bank\",\"name\":\"Bank\",\"type\":\"int\",\"min\":0,\"max\":%u},"
-            "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}]",
-            presets ? presets - 1 : 0, banks ? banks - 1 : 0), out_len);
+    if (!strcmp(key, "ui_hierarchy") || !strcmp(key, "chain_params") || !strncmp(key, "ctl_", 4) || !strcmp(key, "state")) {
+        /* Everything that reads the loaded preset holds it against a swap. */
+        ds_native_engine_t *engine;
+        int k = -1;
+        atomic_fetch_add(&in->audio_users, 1);
+        engine = atomic_load(&in->active);
+        if (!strcmp(key, "ui_hierarchy")) k = write_hierarchy(engine, out, out_len);
+        else if (!strcmp(key, "chain_params")) k = write_chain_params(engine, c ? c->bank_count : 0, b ? b->preset_count : 0, out, out_len);
+        else if (!strcmp(key, "state")) {
+            char path[1024], escaped[1100];
+            seqstr_read(&in->loaded_path, path, sizeof(path));
+            json_escape(escaped, sizeof(escaped), path);
+            k = append(out, 0, out_len, "{\"preset_path\":\"%s\",\"gain\":\"%.3f\",\"controls\":\"", escaped,
+                       (double)atomic_load(&in->gain));
+            for (unsigned i = 0; engine && i < engine->model.control_count; ++i)
+                k = append(out, k, out_len, "%s%g", i ? ";" : "", (double)engine->control_value[i]);
+            k = append(out, k, out_len, "\"}");
+        } else {
+            unsigned i = (unsigned)atoi(key + 4);
+            if (engine && i < engine->model.control_count) {
+                float v = (atomic_load(&in->ctl_dirty) & (1ull << i)) ? atomic_load(&in->ctl_pending[i]) : engine->control_value[i];
+                k = engine->model.controls[i].kind == DS_CONTROL_KNOB && !engine->model.controls[i].integer
+                    ? append(out, 0, out_len, "%.4f", (double)v) : append(out, 0, out_len, "%d", (int)v);
+            }
+        }
+        atomic_fetch_sub(&in->audio_users, 1);
+        return k;
     }
+    if (!strcmp(key, "is_loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->busy) ? 1 : 0), out_len);
     if (!strcmp(key, "bank_list")) {
         int k = snprintf(out, (size_t)out_len, "[");
         for (unsigned i = 0; c && i < c->bank_count; ++i) {
@@ -454,13 +560,6 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
     }
     if (!strcmp(key, "preset_path")) { seqstr_read(&in->loaded_path, out, (size_t)out_len); return (int)strlen(out); }
     if (!strcmp(key, "status")) { seqstr_read(&in->status, out, (size_t)out_len); return (int)strlen(out); }
-    if (!strcmp(key, "state")) {
-        char path[1024], escaped[1100];
-        seqstr_read(&in->loaded_path, path, sizeof(path));
-        json_escape(escaped, sizeof(escaped), path);
-        return finish(snprintf(out, (size_t)out_len, "{\"preset_path\":\"%s\",\"gain\":\"%.3f\"}",
-                               escaped, (double)atomic_load(&in->gain)), out_len);
-    }
     if (!strcmp(key, "gain")) return finish(snprintf(out, (size_t)out_len, "%.3f", (double)atomic_load(&in->gain)), out_len);
     if (!strcmp(key, "loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->loading)), out_len);
     if (!strcmp(key, "load_count")) return finish(snprintf(out, (size_t)out_len, "%u", atomic_load(&in->load_count)), out_len);
@@ -493,7 +592,12 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     memset(buffer, 0, (size_t)frames * 2 * sizeof(float));
     atomic_fetch_add(&in->audio_users, 1);
     engine = atomic_load(&in->active);
-    if (engine) ds_native_engine_render(engine, buffer, (unsigned)frames);
+    if (engine) {
+        uint64_t dirty = atomic_exchange(&in->ctl_dirty, 0);
+        for (unsigned i = 0; dirty; ++i, dirty >>= 1)
+            if (dirty & 1) ds_native_engine_set_control(engine, i, atomic_load(&in->ctl_pending[i]));
+        ds_native_engine_render(engine, buffer, (unsigned)frames);
+    }
     atomic_fetch_sub(&in->audio_users, 1);
     gain = atomic_load(&in->gain);
     for (int i = 0; i < frames * 2; ++i) {

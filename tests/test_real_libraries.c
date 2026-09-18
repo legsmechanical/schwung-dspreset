@@ -39,6 +39,12 @@ static void capture(plugin_t *p, const char *preset) {
     plugin_load(p, preset, status, sizeof(status));
     printf("  status: %s\n", status);
     CHECK(!strcmp(status, "Capture GO-TO Bass.dspreset: 564 zones"));
+    {   /* its controls, named from what they drive (the preset gives no labels) */
+        char params[8192];
+        plugin_get(p, "chain_params", params, sizeof(params));
+        CHECK(strstr(params, "\"name\":\"EQ On\",\"type\":\"enum\",\"options\":[\"On\",\"Off\"]"));
+        CHECK(strstr(params, "\"name\":\"EQ 80\"") && strstr(params, "\"name\":\"EQ 1.5k\"") && strstr(params, "\"name\":\"Cutoff\""));
+    }
     printf("  open descriptors after loading 540 files: %d\n", open_fds());
     CHECK(open_fds() < 40);
 
@@ -122,6 +128,28 @@ static void asimov(plugin_t *p, const char *dir_path) {
         plugin_midi(p, 0x80, 48, 0);
         printf("  %-28s early %.4f  at 3 s %.4f\n", names[k], early / 40, late / (1033 - 990));
         CHECK(early > 0.01 && late > 0.001);
+        if (k == 0) {
+            /* 1 - Off World: eight knobs, and the Attack knob really moves the attack */
+            char params[8192];
+            double slow = 0;
+            const char *want[] = {"Cutoff", "Reverb", "Dly Wet", "Chr Mix", "Attack", "Decay", "Sustain", "Release"};
+            plugin_get(p, "chain_params", params, sizeof(params));
+            for (int i = 0; i < 8; ++i) {
+                char needle[64];
+                snprintf(needle, sizeof(needle), "\"key\":\"ctl_%d\",\"name\":\"%s\"", i, want[i]);
+                if (!strstr(params, needle)) { fprintf(stderr, "FAIL ASIMOV control %d is not %s\n", i, want[i]); exit(1); }
+            }
+            for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+            p->api->set_param(p->instance, "ctl_4", "10");          /* attack 10 s */
+            plugin_render(p, out);
+            plugin_midi(p, 0x90, 48, 100);
+            for (int b = 20; b < 60; ++b) { plugin_render(p, out); slow += rms(out, BLOCK * 2); }
+            plugin_midi(p, 0x80, 48, 0);
+            printf("  Off World, Attack 0 vs 10 s over the first 0.2 s: %.4f vs %.4f\n", early / 40, slow / 40);
+            CHECK(slow / 40 < early / 40 / 10);
+            p->api->set_param(p->instance, "ctl_4", "0");
+            for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+        }
         for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
         free(names[k]);
     }

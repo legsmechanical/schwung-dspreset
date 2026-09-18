@@ -153,6 +153,19 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
         snprintf(error, error_len, "no playable samples (%u files missing)", e->missing_files);
         ds_native_engine_destroy(e); return -1;
     }
+    if (ds_preset_model_load(&e->model, preset_path, error, error_len)) { ds_native_engine_destroy(e); return -1; }
+    e->groups_rt = calloc(e->model.group_count ? e->model.group_count : 1, sizeof(ds_group_settings_t));
+    if (!e->groups_rt) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
+    memcpy(e->groups_rt, e->model.groups, e->model.group_count * sizeof(ds_group_settings_t));
+    e->instrument_rt = e->model.instrument;
+    for (unsigned i = 0; i < e->zone_count; ++i) {
+        e->zones[i].tag_mask = ds_preset_model_tag_mask(&e->model, e->zones[i].def.tags);
+        if (e->zones[i].def.group_index >= (int)e->model.group_count) { e->zones[i].source = -1; }
+    }
+    for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { e->tag_volume[t] = 1.0f; e->tag_enabled[t] = 1; }
+    /* Controls start at the preset's values, and fire (DecentSampler's
+     * triggerOnLoad default) so the sound matches what the preset shows. */
+    for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         e->voices[i].ring = malloc((size_t)DS_RING_FRAMES * 2 * sizeof(float));
         if (!e->voices[i].ring) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
@@ -167,7 +180,8 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
     for (unsigned i = 0; i < e->source_count; ++i) free(e->sources[i].head);
     for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
     for (int i = 0; i < DS_MAX_VOICES; ++i) free(e->voices[i].ring);
-    free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len);
+    free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt);
+    ds_preset_model_free(&e->model);
     memset(e, 0, sizeof(*e));
 }
 
@@ -175,6 +189,125 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
 
 static float coef_for(float seconds, unsigned rate) {
     return seconds > 0 ? expf(logf(SILENT) / (seconds * (float)rate)) : 0.0f;
+}
+
+/* ---- live settings ------------------------------------------------------
+ * A zone's volume, pitch, pan and envelope come from its own attributes where
+ * it sets them, else its group's LIVE settings, else the instrument's — so a
+ * control bound to a group or the instrument moves everything that inherits. */
+typedef struct { float gain, pan, vel_track, env[4]; double tuning; } zone_now_t;
+
+static int zone_enabled(const ds_native_engine_t *e, const ds_zone_t *z) {
+    uint64_t tags = z->tag_mask;
+    if (!e->groups_rt[z->def.group_index].enabled) return 0;
+    for (unsigned t = 0; tags; ++t, tags >>= 1) if ((tags & 1) && !e->tag_enabled[t]) return 0;
+    return 1;
+}
+
+static void zone_now(const ds_native_engine_t *e, const ds_zone_t *z, zone_now_t *out) {
+    const ds_group_settings_t *g = &e->groups_rt[z->def.group_index], *in = &e->instrument_rt;
+    const ds_dspreset_sample_t *d = &z->def;
+    static const unsigned own_env[4] = {DS_OWN_ATTACK, DS_OWN_DECAY, DS_OWN_SUSTAIN, DS_OWN_RELEASE};
+    const float def_env[4] = {d->attack, d->decay, d->sustain, d->release};
+    uint64_t tags = z->tag_mask;
+    out->gain = d->own_volume * g->volume * in->volume;
+    for (unsigned t = 0; tags; ++t, tags >>= 1) if (tags & 1) out->gain *= e->tag_volume[t];
+    out->tuning = d->base_tuning + g->tuning + in->tuning;
+    out->pan = (d->own_mask & DS_OWN_PAN) ? d->pan : g->has_pan ? g->pan : in->pan;
+    out->vel_track = (d->own_mask & DS_OWN_VEL_TRACK) ? d->amp_vel_track : g->has_vel_track ? g->vel_track : in->vel_track;
+    for (int i = 0; i < 4; ++i)
+        out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
+    if (out->pan < -1) out->pan = -1;
+    if (out->pan > 1) out->pan = 1;
+}
+
+static void set_group_value(ds_group_settings_t *g, int target, float v) {
+    switch (target) {
+    case DS_TARGET_VOLUME: g->volume = v < 0 ? 0 : v; break;
+    case DS_TARGET_TUNING: g->tuning = v; break;
+    case DS_TARGET_PAN: g->pan = v / 100.0f; g->has_pan = 1; break;
+    case DS_TARGET_VEL_TRACK: g->vel_track = v; g->has_vel_track = 1; break;
+    case DS_TARGET_ATTACK: case DS_TARGET_DECAY: case DS_TARGET_SUSTAIN: case DS_TARGET_RELEASE:
+        g->env[target - DS_TARGET_ATTACK] = v < 0 ? 0 : v; g->has_env[target - DS_TARGET_ATTACK] = 1; break;
+    case DS_TARGET_ENABLED: g->enabled = v >= 0.5f; break;
+    default: break;
+    }
+}
+
+/* DecentSampler parameter token -> the <effect> attribute it moves. */
+static const char *effect_attribute(const char *token) {
+    static const struct { const char *token, *attr; } map[] = {
+        {"FX_FILTER_FREQUENCY", "frequency"}, {"FX_FILTER_RESONANCE", "resonance"}, {"FX_FILTER_GAIN", "gain"},
+        {"FX_CENTER_FREQUENCY", "frequency"}, {"FX_REVERB_WET_LEVEL", "wetLevel"}, {"FX_REVERB_ROOM_SIZE", "roomSize"},
+        {"FX_REVERB_DAMPING", "damping"}, {"FX_DELAY_TIME", "delayTime"}, {"FX_FEEDBACK", "feedback"},
+        {"FX_WET_LEVEL", "wetLevel"}, {"FX_MIX", "mix"}, {"FX_MOD_RATE", "modRate"}, {"FX_MOD_DEPTH", "modDepth"},
+        {"FX_STEREO_OFFSET", "stereoOffset"}, {"FX_DRIVE", "drive"}, {"FX_OUTPUT_LEVEL", "outputLevel"},
+        {"FX_BIT_DEPTH", "bitDepth"}, {"FX_DOWNSAMPLE_FACTOR", "downsampleFactor"}};
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); ++i) if (!strcmp(token, map[i].token)) return map[i].attr;
+    return NULL;
+}
+
+static void set_effect_value(ds_effect_t *fx, const char *token, float v) {
+    const char *name;
+    if (!strcmp(token, "ENABLED")) { fx->enabled = v >= 0.5f; return; }
+    if (!(name = effect_attribute(token))) return;
+    for (unsigned i = 0; i < fx->param_count; ++i)
+        if (!strcmp(fx->param_names[i], name)) { fx->param_values[i] = v; return; }
+    if (fx->param_count < DS_MAX_EFFECT_PARAMS) {          /* a parameter the XML left at its default */
+        snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "%s", name);
+        fx->param_values[fx->param_count++] = v;
+    }
+}
+
+static void control_changed(ds_native_engine_t *e, unsigned index, float value, int depth);
+
+static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in_min, float in_max, float value, int depth) {
+    float v = ds_binding_translate(b, in_min, in_max, value);
+    switch (b->target) {
+    case DS_TARGET_NONE: return;
+    case DS_TARGET_CONTROL_VALUE:
+        if (depth < 2 && b->position >= 0 && b->position < (int)e->model.control_count) control_changed(e, (unsigned)b->position, v, depth + 1);
+        return;
+    case DS_TARGET_EFFECT:
+        for (unsigned i = 0; i < e->model.effect_count; ++i)
+            if ((b->tag_mask && (e->model.effects[i].tag_mask & b->tag_mask)) || (!b->tag_mask && (int)i == (b->position < 0 ? 0 : b->position)))
+                set_effect_value(&e->model.effects[i], b->name, v);
+        return;
+    default: break;
+    }
+    if (b->level == DS_LEVEL_TAG) {
+        for (unsigned t = 0; t < e->model.tag_count; ++t) {
+            if (!(b->tag_mask & (1ull << t))) continue;
+            if (b->target == DS_TARGET_VOLUME) e->tag_volume[t] = v < 0 ? 0 : v;
+            else if (b->target == DS_TARGET_ENABLED) e->tag_enabled[t] = v >= 0.5f;
+        }
+    } else if (b->level == DS_LEVEL_GROUP) {
+        for (unsigned g = 0; g < e->model.group_count; ++g)
+            if (b->tag_mask ? (e->groups_rt[g].tag_mask & b->tag_mask) != 0 : (int)g == (b->position < 0 ? 0 : b->position))
+                set_group_value(&e->groups_rt[g], b->target, v);
+    } else if (b->level == DS_LEVEL_INSTRUMENT) {
+        set_group_value(&e->instrument_rt, b->target, v);
+    }
+}
+
+static void control_changed(ds_native_engine_t *e, unsigned index, float value, int depth) {
+    const ds_control_t *c = &e->model.controls[index];
+    if (value < c->min) value = c->min;
+    if (value > c->max) value = c->max;
+    if (c->integer) value = floorf(value + 0.5f);
+    e->control_value[index] = value;
+    if (c->kind == DS_CONTROL_KNOB) {
+        for (unsigned i = 0; i < c->binding_count; ++i)
+            apply_binding(e, &e->model.bindings[c->first_binding + i], c->min, c->max, value, depth);
+    } else if (c->choice_count) {
+        const ds_choice_t *ch = &e->model.choices[c->first_choice + (unsigned)value];
+        for (unsigned i = 0; i < ch->binding_count; ++i)
+            apply_binding(e, &e->model.bindings[ch->first_binding + i], c->min, c->max, value, depth);
+    }
+}
+
+void ds_native_engine_set_control(ds_native_engine_t *e, unsigned index, float value) {
+    if (e && index < e->model.control_count) control_changed(e, index, value, 0);
 }
 
 static ds_voice_t *allocate_voice(ds_native_engine_t *e) {
@@ -195,15 +328,13 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
     ds_voice_t *v = allocate_voice(e);
     const ds_source_t *s = &e->sources[z->source];
     const ds_dspreset_sample_t *d = &z->def;
-    float vel_gain = 1.0f - d->amp_vel_track + d->amp_vel_track * (velocity / 127.0f);
-    float gain = d->gain * vel_gain;
+    zone_now_t now;
     uint32_t zone_index = (uint32_t)(z - e->zones);
 
+    zone_now(e, z, &now);
     v->zone = z; v->src = s;
     v->pos = (double)z->start;
-    v->inc = ((double)s->file.sample_rate / e->output_rate) * pow(2.0, (note - d->root_note + d->tuning) / 12.0);
-    v->gain_l = gain * (d->pan > 0 ? 1.0f - d->pan : 1.0f);
-    v->gain_r = gain * (d->pan < 0 ? 1.0f + d->pan : 1.0f);
+    v->vel = velocity / 127.0f;
     v->note = note; v->velocity = velocity;
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
     v->age = ++e->age_counter;
@@ -212,10 +343,11 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
         v->env_stage = DS_ENV_SUSTAIN; v->env_level = 1.0f; v->env_sustain = 1.0f;
         v->env_release_coef = coef_for(0.005f, e->output_rate);
     } else {
-        v->env_sustain = d->sustain < 0 ? 0 : d->sustain > 1 ? 1 : d->sustain;
-        v->env_attack_step = d->attack > 0 ? 1.0f / (d->attack * (float)e->output_rate) : 1.0f;
-        v->env_decay_coef = coef_for(d->decay, e->output_rate);
-        v->env_release_coef = coef_for(d->release > 0.002f ? d->release : 0.002f, e->output_rate);
+        float attack = now.env[0], decay = now.env[1], sustain = now.env[2], release = now.env[3];
+        v->env_sustain = sustain < 0 ? 0 : sustain > 1 ? 1 : sustain;
+        v->env_attack_step = attack > 0 ? 1.0f / (attack * (float)e->output_rate) : 1.0f;
+        v->env_decay_coef = coef_for(decay, e->output_rate);
+        v->env_release_coef = coef_for(release > 0.002f ? release : 0.002f, e->output_rate);
         v->env_level = 0.0f;
         v->env_stage = DS_ENV_ATTACK;
     }
@@ -231,12 +363,23 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
     v->active = 1;
 }
 
-static void release_voice(ds_voice_t *v) {
-    if (v->env_stage != DS_ENV_DONE) v->env_stage = DS_ENV_RELEASE;
+static void release_voice(ds_native_engine_t *e, ds_voice_t *v) {
+    if (v->env_stage == DS_ENV_DONE) return;
+    if (v->zone->def.amp_env_enabled) {
+        zone_now_t now;
+        zone_now(e, v->zone, &now);                     /* a Release knob reaches held notes */
+        v->env_release_coef = coef_for(now.env[3] > 0.002f ? now.env[3] : 0.002f, e->output_rate);
+    }
+    /* Released before it rendered a sample (note-on and note-off in one block,
+     * a short sequenced note): start the release from the attack's first step,
+     * or it decays from zero and the note is never heard at all. */
+    if (v->env_stage == DS_ENV_ATTACK && v->env_level <= 0.0f)
+        v->env_level = v->env_attack_step < 1.0f ? v->env_attack_step : 1.0f;
+    v->env_stage = DS_ENV_RELEASE;
 }
 
-static int zone_matches(const ds_zone_t *z, int note, int velocity, int trigger) {
-    return z->source >= 0 && z->def.trigger == trigger &&
+static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int trigger) {
+    return z->source >= 0 && z->def.trigger == trigger && zone_enabled(e, z) &&
            note >= z->def.lo_note && note <= z->def.hi_note &&
            velocity >= z->def.lo_vel && velocity <= z->def.hi_vel;
 }
@@ -250,13 +393,13 @@ static void trigger_zones(ds_native_engine_t *e, int note, int velocity, int tri
     memset(e->group_len, 0, e->group_count);
     for (unsigned i = 0; i < e->zone_count; ++i) {
         const ds_zone_t *z = &e->zones[i];
-        if (zone_matches(z, note, velocity, trigger) && z->def.seq_position > e->group_len[z->def.group_index])
+        if (zone_matches(e, z, note, velocity, trigger) && z->def.seq_position > e->group_len[z->def.group_index])
             e->group_len[z->def.group_index] = (unsigned char)(z->def.seq_position > 255 ? 255 : z->def.seq_position);
     }
     for (unsigned i = 0; i < e->zone_count; ++i) {
         const ds_zone_t *z = &e->zones[i];
         unsigned len;
-        if (!zone_matches(z, note, velocity, trigger)) continue;
+        if (!zone_matches(e, z, note, velocity, trigger)) continue;
         len = e->group_len[z->def.group_index] ? e->group_len[z->def.group_index] : 1;
         if (z->def.seq_mode == DS_SEQ_ROUND_ROBIN && (int)(counter % len) + 1 != z->def.seq_position) continue;
         if (z->def.seq_mode == DS_SEQ_RANDOM && (int)(random % len) + 1 != z->def.seq_position) continue;
@@ -278,7 +421,7 @@ void ds_native_engine_note_off(ds_native_engine_t *e, int note) {
         if (!v->active || !v->key_down || v->note != note) continue;
         v->key_down = 0;
         if (e->sustain_pedal) v->sustained = 1;
-        else release_voice(v);
+        else release_voice(e, v);
     }
     if (e->note_velocity[note]) trigger_zones(e, note, e->note_velocity[note], DS_TRIGGER_RELEASE);
     e->note_velocity[note] = 0;
@@ -286,16 +429,22 @@ void ds_native_engine_note_off(ds_native_engine_t *e, int note) {
 
 void ds_native_engine_cc(ds_native_engine_t *e, int cc, int value) {
     if (!e) return;
+    for (unsigned m = 0; m < e->model.cc_count; ++m) {
+        const ds_cc_map_t *map = &e->model.ccs[m];
+        if (map->cc != cc) continue;
+        for (unsigned i = 0; i < map->binding_count; ++i)
+            apply_binding(e, &e->model.bindings[map->first_binding + i], 0, 127, (float)value, 0);
+    }
     if (cc == 64) {
         int down = value >= 64;
         if (e->sustain_pedal && !down)
             for (int i = 0; i < DS_MAX_VOICES; ++i)
-                if (e->voices[i].active && e->voices[i].sustained) { e->voices[i].sustained = 0; release_voice(&e->voices[i]); }
+                if (e->voices[i].active && e->voices[i].sustained) { e->voices[i].sustained = 0; release_voice(e, &e->voices[i]); }
         e->sustain_pedal = down;
     } else if (cc == 120) {
         for (int i = 0; i < DS_MAX_VOICES; ++i) e->voices[i].active = 0;
     } else if (cc == 123) {
-        for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->voices[i].active) { e->voices[i].key_down = 0; release_voice(&e->voices[i]); }
+        for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->voices[i].active) { e->voices[i].key_down = 0; release_voice(e, &e->voices[i]); }
     }
 }
 
@@ -322,7 +471,18 @@ static inline int fetch(const ds_voice_t *v, uint64_t vf, uint32_t produced, flo
 
 static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsigned frames) {
     uint32_t produced = packed_produced(atomic_load_explicit(&v->stream, memory_order_acquire));
-    double inc = v->inc * e->bend_ratio;
+    double inc;
+    {   /* volume, pan and pitch follow the controls while the note sounds */
+        zone_now_t now;
+        float gain;
+        zone_now(e, v->zone, &now);
+        gain = now.gain * (1.0f - now.vel_track + now.vel_track * v->vel);
+        v->gain_l = gain * (now.pan > 0 ? 1.0f - now.pan : 1.0f);
+        v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
+        v->inc = ((double)v->src->file.sample_rate / e->output_rate) *
+                 pow(2.0, (v->note - v->zone->def.root_note + now.tuning) / 12.0);
+    }
+    inc = v->inc * e->bend_ratio;
     for (unsigned i = 0; i < frames; ++i) {
         uint64_t v0 = (uint64_t)v->pos;
         float frac = (float)(v->pos - (double)v0), l0, r0, l1, r1, level;

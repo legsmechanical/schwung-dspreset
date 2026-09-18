@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "dspreset_parser.h"
+#include "preset_model.h"
 #include "wav_source.h"
 
 #define DS_MAX_ZONES 8192
@@ -33,6 +34,7 @@ typedef struct {
     int loop;
     uint64_t loop_start, loop_end;      /* loop_end exclusive */
     int streams;                        /* needs frames beyond the resident head */
+    uint64_t tag_mask;                  /* in the model's tag numbering */
 } ds_zone_t;
 
 enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE };
@@ -55,6 +57,7 @@ typedef struct {
     int note, velocity, active, key_down, sustained, one_shot;
     uint32_t age, generation;
     uint32_t underruns;
+    float vel;                          /* velocity 0..1, re-applied as settings move */
 } ds_voice_t;
 
 typedef struct {
@@ -79,6 +82,14 @@ typedef struct {
     int stream_fd[DS_MAX_VOICES];
     uint64_t stream_key[DS_MAX_VOICES]; /* generation+zone the descriptor was opened for */
     uint64_t resident_bytes;
+    /* The preset's controls and what they write into. Written by the audio
+     * thread only (control changes, CCs), or by the worker before publish. */
+    ds_preset_model_t model;
+    ds_group_settings_t *groups_rt;     /* model.group_count, live */
+    ds_group_settings_t instrument_rt;
+    float tag_volume[DS_MAX_TAGS];
+    unsigned char tag_enabled[DS_MAX_TAGS];
+    float control_value[DS_MAX_CONTROLS];
 } ds_native_engine_t;
 
 /* Loading is worker-only: parses XML, opens files, reads every resident head.
@@ -97,6 +108,9 @@ void ds_native_engine_note_on(ds_native_engine_t *engine, int note, int velocity
 void ds_native_engine_note_off(ds_native_engine_t *engine, int note);
 void ds_native_engine_cc(ds_native_engine_t *engine, int cc, int value);
 void ds_native_engine_pitch_bend(ds_native_engine_t *engine, int value14);
+/* A preset control moved: stores it and fires its bindings. Audio thread (or
+ * the worker before the engine is published). Buttons/menus take an index. */
+void ds_native_engine_set_control(ds_native_engine_t *engine, unsigned index, float value);
 void ds_native_engine_render(ds_native_engine_t *engine, float *out_lr, unsigned frames);
 unsigned ds_native_engine_active_voices(const ds_native_engine_t *engine);
 

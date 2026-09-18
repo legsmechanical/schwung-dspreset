@@ -1,0 +1,415 @@
+#include "preset_model.h"
+
+#include "dspreset_parser.h"
+
+#include <ctype.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#define MAX_PRESET_BYTES (16 * 1024 * 1024)
+#define MAX_BINDINGS 2048
+#define MAX_CHOICES 512
+#define MAX_CCS 128
+#define MAX_EFFECTS 64
+#define MAX_GROUPS 4096
+
+static void fail(char *out, unsigned n, const char *message) { if (n) snprintf(out, n, "%s", message); }
+
+static int attr(const char *a, const char *e, const char *name, char *out, unsigned n) {
+    return ds_xml_attribute(a, e, name, out, n);
+}
+
+static int attr_num(const char *a, const char *e, const char *name, float *out) {
+    char text[64]; char *tail;
+    double v;
+    if (!attr(a, e, name, text, sizeof(text))) return 0;
+    v = strtod(text, &tail);
+    if (tail == text) return 0;
+    *out = (float)v;
+    return 1;
+}
+
+/* "0.5", "-6dB" -> linear */
+static int attr_volume(const char *a, const char *e, float *out) {
+    char text[64]; char *tail;
+    double v;
+    if (!attr(a, e, "volume", text, sizeof(text))) return 0;
+    v = strtod(text, &tail);
+    if (tail == text) return 0;
+    while (isspace((unsigned char)*tail)) ++tail;
+    *out = !strncasecmp(tail, "db", 2) ? (float)pow(10.0, v / 20.0) : (float)v;
+    return 1;
+}
+
+static int is_name_char(char c) { return isalnum((unsigned char)c) || c == '_' || c == '-'; }
+static int tag_is(const char *tag, const char *name) {
+    size_t n = strlen(name);
+    return !strncmp(tag, name, n) && !is_name_char(tag[n]);
+}
+
+uint64_t ds_preset_model_tag_mask(ds_preset_model_t *m, const char *list) {
+    uint64_t mask = 0;
+    const char *p = list;
+    while (p && *p) {
+        char name[32];
+        unsigned n = 0, i;
+        while (*p == ',' || isspace((unsigned char)*p)) ++p;
+        while (*p && *p != ',' && n + 1 < sizeof(name)) name[n++] = *p++;
+        while (n && isspace((unsigned char)name[n - 1])) --n;
+        name[n] = '\0';
+        while (*p && *p != ',') ++p;
+        if (!n) continue;
+        for (i = 0; i < m->tag_count && strcmp(m->tag_names[i], name); ++i) {}
+        if (i == m->tag_count) {
+            if (m->tag_count == DS_MAX_TAGS) continue;
+            snprintf(m->tag_names[m->tag_count++], sizeof(m->tag_names[0]), "%s", name);
+        }
+        mask |= 1ull << i;
+    }
+    return mask;
+}
+
+float ds_binding_translate(const ds_binding_t *b, float in_min, float in_max, float v) {
+    float lo = in_min < in_max ? in_min : in_max, hi = in_min < in_max ? in_max : in_min;
+    float t;
+    if (b->translation == DS_TRANSLATE_FIXED) return b->fixed;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    t = hi > lo ? (v - lo) / (hi - lo) : 0.0f;
+    if (b->reversed) t = 1.0f - t;
+    if (b->translation == DS_TRANSLATE_TABLE && b->table_n >= 2) {
+        /* Same reading as the Multisampler converter, which was tuned against
+         * real libraries: the knob's position scales the table's key axis. */
+        float key = t * b->table_in[b->table_n - 1];
+        if (key <= b->table_in[0]) v = b->table_out[0];
+        else if (key >= b->table_in[b->table_n - 1]) v = b->table_out[b->table_n - 1];
+        else {
+            int i = 0;
+            while (i < b->table_n - 1 && key > b->table_in[i + 1]) ++i;
+            float span = b->table_in[i + 1] - b->table_in[i];
+            float f = span != 0 ? (key - b->table_in[i]) / span : 0;
+            v = b->table_out[i] + f * (b->table_out[i + 1] - b->table_out[i]);
+        }
+    } else if (b->has_range) {
+        v = b->out_min + t * (b->out_max - b->out_min);
+    } else if (b->reversed) {
+        v = lo + t * (hi - lo);
+    }
+    if (b->has_factor) v *= b->factor;
+    return v;
+}
+
+static int target_for(const char *type, const char *level, const char *param) {
+    if (!strcmp(type, "effect")) return DS_TARGET_EFFECT;
+    if (!strcmp(param, "VALUE") && (!strcmp(level, "ui") || !strcmp(type, "control"))) return DS_TARGET_CONTROL_VALUE;
+    if (!strcmp(param, "AMP_VOLUME") || !strcmp(param, "TAG_VOLUME")) return DS_TARGET_VOLUME;
+    if (!strcmp(param, "GLOBAL_TUNING") || !strcmp(param, "GROUP_TUNING") || !strcmp(param, "TUNING")) return DS_TARGET_TUNING;
+    if (!strcmp(param, "PAN")) return DS_TARGET_PAN;
+    if (!strcmp(param, "AMP_VEL_TRACK")) return DS_TARGET_VEL_TRACK;
+    if (!strcmp(param, "ENV_ATTACK")) return DS_TARGET_ATTACK;
+    if (!strcmp(param, "ENV_DECAY")) return DS_TARGET_DECAY;
+    if (!strcmp(param, "ENV_SUSTAIN")) return DS_TARGET_SUSTAIN;
+    if (!strcmp(param, "ENV_RELEASE")) return DS_TARGET_RELEASE;
+    if (!strcmp(param, "ENABLED") || !strcmp(param, "TAG_ENABLED")) return DS_TARGET_ENABLED;
+    return DS_TARGET_NONE;
+}
+
+static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds_binding_t *b) {
+    char type[32] = "", level[32] = "", param[32] = "", text[1024];
+    float f;
+    memset(b, 0, sizeof(*b));
+    attr(a, e, "type", type, sizeof(type));
+    attr(a, e, "level", level, sizeof(level));
+    attr(a, e, "parameter", param, sizeof(param));
+    snprintf(b->name, sizeof(b->name), "%s", param);
+    b->target = target_for(type, level, param);
+    b->level = !strcmp(level, "group") ? DS_LEVEL_GROUP : !strcmp(level, "tag") ? DS_LEVEL_TAG :
+               !strcmp(level, "ui") ? DS_LEVEL_UI : !strcmp(level, "instrument") || !level[0] ? DS_LEVEL_INSTRUMENT : DS_LEVEL_OTHER;
+    b->position = -1;
+    if (attr_num(a, e, "position", &f) || attr_num(a, e, "groupIndex", &f) || attr_num(a, e, "effectIndex", &f) ||
+        attr_num(a, e, "controlIndex", &f)) b->position = (int)f;
+    if (b->level == DS_LEVEL_TAG) {
+        if (attr(a, e, "identifier", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text)))
+            b->tag_mask = ds_preset_model_tag_mask(m, text);
+    } else if (attr(a, e, "groupTags", text, sizeof(text)) || attr(a, e, "effectTags", text, sizeof(text)) ||
+               attr(a, e, "tags", text, sizeof(text))) {
+        b->tag_mask = ds_preset_model_tag_mask(m, text);
+    }
+    if (attr(a, e, "translation", text, sizeof(text))) {
+        if (!strcmp(text, "table")) b->translation = DS_TRANSLATE_TABLE;
+        else if (!strcmp(text, "fixed_value")) b->translation = DS_TRANSLATE_FIXED;
+    }
+    b->has_range = attr_num(a, e, "translationOutputMin", &b->out_min) & attr_num(a, e, "translationOutputMax", &b->out_max);
+    if (attr(a, e, "translationReversed", text, sizeof(text))) b->reversed = !strcasecmp(text, "true");
+    b->has_factor = attr_num(a, e, "factor", &b->factor);
+    if (attr(a, e, "translationTable", text, sizeof(text))) {
+        const char *q = text;
+        while (*q && b->table_n < DS_MAX_TABLE) {
+            char *next;
+            float k = strtof(q, &next);
+            if (next == q || *next != ',') break;
+            b->table_in[b->table_n] = k;
+            b->table_out[b->table_n] = strtof(next + 1, &next);
+            b->table_n++;
+            q = strchr(next, ';');
+            if (!q) break;
+            ++q;
+        }
+    }
+    if (attr(a, e, "translationValue", text, sizeof(text))) {
+        char *tail;
+        if (!strcasecmp(text, "true")) b->fixed = 1;
+        else if (!strcasecmp(text, "false")) b->fixed = 0;
+        else {
+            b->fixed = strtof(text, &tail);
+            while (isspace((unsigned char)*tail)) ++tail;
+            if (!strncasecmp(tail, "db", 2)) b->fixed = powf(10.0f, b->fixed / 20.0f);
+        }
+    }
+}
+
+static void group_settings(ds_group_settings_t *g, const char *a, const char *e, int instrument) {
+    static const char *env_names[4] = {"attack", "decay", "sustain", "release"};
+    static const float env_defaults[4] = {0.0f, 0.0f, 1.0f, 0.5f};   /* see dspreset_parser.c */
+    char text[256];
+    float f;
+    memset(g, 0, sizeof(*g));
+    g->volume = 1;
+    if (a) attr_volume(a, e, &g->volume);
+    g->tuning = a && attr_num(a, e, "groupTuning", &f) ? f : 0;
+    g->has_pan = a && attr_num(a, e, "pan", &g->pan);
+    g->pan /= 100.0f;
+    g->vel_track = 1;
+    g->has_vel_track = a && attr_num(a, e, "ampVelTrack", &g->vel_track);
+    for (int i = 0; i < 4; ++i) {
+        g->env[i] = env_defaults[i];
+        g->has_env[i] = a && attr_num(a, e, env_names[i], &g->env[i]);
+        if (instrument) g->has_env[i] = 1;
+    }
+    if (instrument) g->has_pan = g->has_vel_track = 1;
+    g->enabled = !(a && attr(a, e, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0")));
+    if (a && attr(a, e, "name", text, sizeof(text))) snprintf(g->name, sizeof(g->name), "%.63s", text);
+}
+
+/* ---- labels for controls that bring none (image-skinned presets) -------- */
+
+static const char *alias(const char *p) {
+    static const struct { const char *param, *label; } table[] = {
+        {"FX_FILTER_FREQUENCY", "Cutoff"}, {"FX_FILTER_RESONANCE", "Reso"}, {"FX_CENTER_FREQUENCY", "Center"},
+        {"FX_REVERB_WET_LEVEL", "Reverb"}, {"FX_REVERB_ROOM_SIZE", "Room"}, {"FX_REVERB_DAMPING", "Damp"},
+        {"FX_DELAY_TIME", "Dly Time"}, {"FX_FEEDBACK", "Feedback"}, {"FX_WET_LEVEL", "Wet"}, {"FX_MIX", "Mix"},
+        {"FX_MOD_RATE", "Rate"}, {"FX_MOD_DEPTH", "Depth"}, {"FX_STEREO_OFFSET", "Width"}, {"FX_FILTER_GAIN", "Gain"},
+        {"FX_DRIVE", "Drive"}, {"FX_OUTPUT_LEVEL", "Level"}, {"ENV_ATTACK", "Attack"}, {"ENV_DECAY", "Decay"},
+        {"ENV_SUSTAIN", "Sustain"}, {"ENV_RELEASE", "Release"}, {"AMP_VOLUME", "Volume"}, {"TAG_VOLUME", "Volume"},
+        {"GLOBAL_TUNING", "Tune"}, {"GROUP_TUNING", "Tune"}, {"TUNING", "Tune"}, {"PAN", "Pan"},
+        {"ENABLED", "On"}, {"TAG_ENABLED", "On"}, {"AMP_VEL_TRACK", "Vel Sens"}};
+    for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); ++i) if (!strcmp(p, table[i].param)) return table[i].label;
+    return NULL;
+}
+
+static const char *effect_prefix(const char *type) {
+    if (!strcmp(type, "delay")) return "Dly";
+    if (!strcmp(type, "chorus")) return "Chr";
+    if (!strcmp(type, "phaser")) return "Phs";
+    if (!strcmp(type, "reverb") || !strcmp(type, "convolution")) return "Rev";
+    if (!strcmp(type, "peak") || !strcmp(type, "lowpass") || !strcmp(type, "highpass") || !strcmp(type, "bandpass") ||
+        !strcmp(type, "lowpass_4pl") || !strcmp(type, "notch")) return "EQ";
+    return NULL;
+}
+
+static void name_control(ds_preset_model_t *m, ds_control_t *c, unsigned index) {
+    const ds_binding_t *b;
+    unsigned first = c->first_binding, count = c->binding_count;
+    if (c->name[0]) return;
+    if (!count && c->choice_count) { first = m->choices[c->first_choice].first_binding; count = m->choices[c->first_choice].binding_count; }
+    b = count ? &m->bindings[first] : NULL;
+    if (b && b->target == DS_TARGET_VOLUME && b->level == DS_LEVEL_GROUP && b->position >= 0 &&
+        b->position < (int)m->group_count && m->groups[b->position].name[0]) {
+        snprintf(c->name, sizeof(c->name), "%.31s", m->groups[b->position].name);
+    } else if (b && b->level == DS_LEVEL_TAG && b->tag_mask) {
+        for (unsigned t = 0; t < m->tag_count; ++t)
+            if (b->tag_mask & (1ull << t)) { snprintf(c->name, sizeof(c->name), "%.31s", m->tag_names[t]); break; }
+    } else if (b && b->target == DS_TARGET_EFFECT && b->position >= 0 && b->position < (int)m->effect_count) {
+        const ds_effect_t *fx = &m->effects[b->position];
+        const char *label = alias(b->name), *prefix = effect_prefix(fx->type);
+        float freq = 0;
+        for (unsigned i = 0; i < fx->param_count; ++i) if (!strcmp(fx->param_names[i], "frequency")) freq = fx->param_values[i];
+        if (!strcmp(fx->type, "peak") && freq > 0 && !strcmp(b->name, "FX_FILTER_GAIN"))
+            snprintf(c->name, sizeof(c->name), freq >= 1000 ? "EQ %.3gk" : "EQ %.0f", freq >= 1000 ? freq / 1000 : freq);
+        else if (label && prefix && (!strcmp(label, "Wet") || !strcmp(label, "Mix") || !strcmp(label, "Rate") ||
+                                     !strcmp(label, "Depth") || !strcmp(label, "Feedback") || !strcmp(label, "On")))
+            snprintf(c->name, sizeof(c->name), "%s %s", prefix, label);
+        else if (label) snprintf(c->name, sizeof(c->name), "%s", label);
+    } else if (b && alias(b->name)) {
+        snprintf(c->name, sizeof(c->name), "%s", alias(b->name));
+    }
+    if (!c->name[0]) snprintf(c->name, sizeof(c->name), "%s %u", c->kind == DS_CONTROL_KNOB ? "Knob" : c->kind == DS_CONTROL_BUTTON ? "Button" : "Menu", index + 1);
+}
+
+/* ---- the walk ----------------------------------------------------------- */
+
+int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, unsigned error_len) {
+    FILE *file;
+    long length;
+    char *xml, *p, *w;
+    int in_ui = 0, in_midi = 0, in_mod = 0, in_effects = 0, in_group = 0;
+    int ctrl = -1, choice = -1, cc = -1, group = -1;
+    memset(m, 0, sizeof(*m));
+    group_settings(&m->instrument, NULL, NULL, 1);
+    if (!(file = fopen(path, "rb")) || fseek(file, 0, SEEK_END) || (length = ftell(file)) < 0 ||
+        length > MAX_PRESET_BYTES || fseek(file, 0, SEEK_SET)) {
+        if (file) fclose(file);
+        fail(error, error_len, "cannot read DSPreset"); return -1;
+    }
+    xml = malloc((size_t)length + 1);
+    m->groups = calloc(MAX_GROUPS, sizeof(ds_group_settings_t));
+    m->choices = calloc(MAX_CHOICES, sizeof(ds_choice_t));
+    m->bindings = calloc(MAX_BINDINGS, sizeof(ds_binding_t));
+    m->ccs = calloc(MAX_CCS, sizeof(ds_cc_map_t));
+    m->effects = calloc(MAX_EFFECTS, sizeof(ds_effect_t));
+    if (!xml || !m->groups || !m->choices || !m->bindings || !m->ccs || !m->effects ||
+        fread(xml, 1, (size_t)length, file) != (size_t)length) {
+        fclose(file); free(xml); ds_preset_model_free(m);
+        fail(error, error_len, "cannot read DSPreset"); return -1;
+    }
+    fclose(file);
+    xml[length] = '\0';
+    for (p = w = xml; *p; ) {                                /* drop comments */
+        if (!strncmp(p, "<!--", 4)) { char *c = strstr(p + 4, "-->"); if (!c) break; p = c + 3; continue; }
+        *w++ = *p++;
+    }
+    *w = '\0';
+
+    for (p = xml; (p = strchr(p, '<')) != NULL; ) {
+        char *tag = p + 1, *end = strchr(tag, '>'), *a;
+        int closing = 0, self_closing;
+        if (!end) break;
+        p = end + 1;
+        if (*tag == '?' || *tag == '!') continue;
+        if (*tag == '/') { closing = 1; ++tag; }
+        self_closing = end > tag && end[-1] == '/';
+        a = tag;
+        while (*a && is_name_char(*a)) ++a;               /* attributes start after the name */
+
+        if (tag_is(tag, "ui")) { in_ui = !closing && !self_closing; continue; }
+        if (tag_is(tag, "midi")) { in_midi = !closing && !self_closing; continue; }
+        if (tag_is(tag, "modulators")) { in_mod = !closing && !self_closing; continue; }
+        if (tag_is(tag, "effects")) { in_effects = !closing && !self_closing; continue; }
+        if (tag_is(tag, "groups")) { if (!closing) group_settings(&m->instrument, a, end, 1); continue; }
+        if (tag_is(tag, "group")) {
+            if (closing) { in_group = 0; continue; }
+            if (m->group_count == MAX_GROUPS) continue;
+            group = (int)m->group_count++;
+            group_settings(&m->groups[group], a, end, 0);
+            { char tags[256]; if (attr(a, end, "tags", tags, sizeof(tags))) m->groups[group].tag_mask = ds_preset_model_tag_mask(m, tags); }
+            in_group = !self_closing;
+            continue;
+        }
+        if (in_effects && !closing && tag_is(tag, "effect") && m->effect_count < MAX_EFFECTS) {
+            ds_effect_t *fx = &m->effects[m->effect_count++];
+            const char *q = a;
+            char text[256];
+            attr(a, end, "type", fx->type, sizeof(fx->type));
+            fx->group = in_group ? group : -1;
+            fx->enabled = !(attr(a, end, "enabled", text, sizeof(text)) && !strcasecmp(text, "false"));
+            if (attr(a, end, "tags", text, sizeof(text))) fx->tag_mask = ds_preset_model_tag_mask(m, text);
+            while (q < end && fx->param_count < DS_MAX_EFFECT_PARAMS) {    /* every numeric attribute */
+                char key[24]; unsigned n = 0; float v;
+                while (q < end && !is_name_char(*q)) ++q;
+                while (q < end && is_name_char(*q) && n + 1 < sizeof(key)) key[n++] = *q++;
+                key[n] = '\0';
+                while (q < end && *q != '"' && *q != '\'') ++q;
+                if (q >= end) break;
+                { char quote = *q++; while (q < end && *q != quote) ++q; ++q; }
+                if (n && strcmp(key, "type") && strcmp(key, "tags") && attr_num(a, end, key, &v)) {
+                    snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "%s", key);
+                    fx->param_values[fx->param_count++] = v;
+                }
+            }
+            continue;
+        }
+        if (in_ui) {
+            int knob = tag_is(tag, "labeled-knob") || tag_is(tag, "control");
+            if ((knob || tag_is(tag, "button") || tag_is(tag, "menu")) && closing) { ctrl = -1; continue; }
+            if ((knob || tag_is(tag, "button") || tag_is(tag, "menu")) && m->control_count < DS_MAX_CONTROLS) {
+                ds_control_t *c = &m->controls[m->control_count];
+                char text[64];
+                float v;
+                memset(c, 0, sizeof(*c));
+                c->kind = knob ? DS_CONTROL_KNOB : tag_is(tag, "button") ? DS_CONTROL_BUTTON : DS_CONTROL_MENU;
+                if ((attr(a, end, "label", text, sizeof(text)) && text[0]) ||
+                    (attr(a, end, "parameterName", text, sizeof(text)) && text[0]))
+                    snprintf(c->name, sizeof(c->name), "%.31s", text);
+                c->min = attr_num(a, end, "minValue", &v) ? v : 0;
+                c->max = attr_num(a, end, "maxValue", &v) ? v : 1;
+                c->def = attr_num(a, end, "value", &v) ? v : c->min;
+                c->integer = attr(a, end, "type", text, sizeof(text)) && !strcmp(text, "integer");
+                if (c->kind == DS_CONTROL_MENU) c->def = c->def >= 1 ? c->def - 1 : 0;   /* DS menus are 1-based */
+                c->first_binding = m->binding_count;
+                c->first_choice = m->choice_count;
+                ctrl = (int)m->control_count++;
+                choice = -1;
+                if (self_closing) ctrl = -1;
+                continue;
+            }
+            if ((tag_is(tag, "state") || tag_is(tag, "option")) && ctrl >= 0) {
+                if (closing) { choice = -1; continue; }
+                if (m->choice_count < MAX_CHOICES) {
+                    ds_choice_t *ch = &m->choices[m->choice_count];
+                    char text[64] = "";
+                    attr(a, end, "name", text, sizeof(text));
+                    snprintf(ch->name, sizeof(ch->name), "%.31s", text[0] ? text : "Option");
+                    ch->first_binding = m->binding_count;
+                    m->controls[ctrl].choice_count++;
+                    choice = (int)m->choice_count++;
+                    if (self_closing) choice = -1;
+                }
+                continue;
+            }
+        }
+        if (in_midi && tag_is(tag, "cc")) {
+            float v;
+            if (closing) { cc = -1; continue; }
+            if (m->cc_count < MAX_CCS && attr_num(a, end, "number", &v)) {
+                m->ccs[m->cc_count].cc = (int)v;
+                m->ccs[m->cc_count].first_binding = m->binding_count;
+                cc = self_closing ? -1 : (int)m->cc_count;
+                m->cc_count++;
+            }
+            continue;
+        }
+        if (!closing && tag_is(tag, "binding") && !in_mod && m->binding_count < MAX_BINDINGS) {
+            if (in_ui && ctrl >= 0 && choice >= 0) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->choices[choice].binding_count++; }
+            else if (in_ui && ctrl >= 0 && m->controls[ctrl].kind == DS_CONTROL_KNOB) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->controls[ctrl].binding_count++; }
+            else if (in_midi && cc >= 0) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->ccs[cc].binding_count++; }
+        }
+    }
+    free(xml);
+    for (unsigned i = 0; i < m->control_count; ++i) {
+        ds_control_t *c = &m->controls[i];
+        if (c->kind != DS_CONTROL_KNOB) { c->min = 0; c->max = c->choice_count ? (float)(c->choice_count - 1) : 0; c->integer = 1; }
+        if (c->def < c->min) c->def = c->min;
+        if (c->def > c->max) c->def = c->max;
+        name_control(m, c, i);
+    }
+    /* Two knobs both called "Volume" say nothing; number the repeats. */
+    for (unsigned i = 0; i < m->control_count; ++i) {
+        unsigned seen = 1;
+        for (unsigned j = i + 1; j < m->control_count; ++j)
+            if (!strcmp(m->controls[i].name, m->controls[j].name)) {
+                char base[32];
+                snprintf(base, sizeof(base), "%.20s", m->controls[j].name);
+                snprintf(m->controls[j].name, sizeof(m->controls[j].name), "%.20s %u", base, ++seen % 1000u);
+            }
+    }
+    return 0;
+}
+
+void ds_preset_model_free(ds_preset_model_t *m) {
+    if (!m) return;
+    free(m->groups); free(m->choices); free(m->bindings); free(m->ccs); free(m->effects);
+    memset(m, 0, sizeof(*m));
+}

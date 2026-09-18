@@ -43,7 +43,7 @@ int main(void) {
         "  <group trigger=\"release\" ampVelTrack=\"0\"><sample path=\"Samples/rel.wav\" rootNote=\"60\" playbackMode=\"memory\"/></group>\n"
         "</groups>\n<effects><effect type=\"lowpass\"/></effects>\n</DecentSampler>\n");
     CHECK(ds_dspreset_visit_samples(path, keep, &seen, error, sizeof(error)) == 0);
-    CHECK(seen.n == 3);
+    CHECK(seen.n == 4);                                    /* the disabled group loads too */
 
     /* inherited from <groups> and <group>, backslashes normalised */
     CHECK(!strcmp(seen.s[0].path, "Samples/low.wav"));
@@ -60,10 +60,14 @@ int main(void) {
     CHECK(seen.s[1].lo_note == 0 && seen.s[1].hi_note == 127);   /* guide defaults */
     CHECK(seen.s[1].loop_enabled == 1 && seen.s[1].loop_start == 10 && seen.s[1].loop_end == 20);
 
-    /* a disabled group contributes nothing; release triggers are marked */
-    CHECK(!strcmp(seen.s[2].path, "Samples/rel.wav"));
-    CHECK(seen.s[2].trigger == DS_TRIGGER_RELEASE && near(seen.s[2].amp_vel_track, 0));
-    CHECK(seen.s[2].playback_mode == DS_PLAYBACK_MEMORY && seen.s[2].group_index == 2);
+    /* own values are separated from inherited ones */
+    CHECK(seen.s[0].own_mask == 0 && near(seen.s[0].own_volume, 1) && near(seen.s[0].base_tuning, 0.5));
+    CHECK(seen.s[1].own_mask == DS_OWN_RELEASE && near(seen.s[1].own_volume, 2));
+    CHECK(!strcmp(seen.s[2].path, "Samples/off.wav") && seen.s[2].group_index == 1);
+    /* release triggers are marked */
+    CHECK(!strcmp(seen.s[3].path, "Samples/rel.wav"));
+    CHECK(seen.s[3].trigger == DS_TRIGGER_RELEASE && near(seen.s[3].amp_vel_track, 0));
+    CHECK(seen.s[3].playback_mode == DS_PLAYBACK_MEMORY && seen.s[3].group_index == 2);
 
     /* a preset with no samples reports it */
     snprintf(path, sizeof(path), "%s/empty.dspreset", dir);

@@ -13,7 +13,11 @@ source.
 - **Missing samples don't stop a preset loading** — the rest of it plays.
 - **`.dslibrary` packages** are unpacked on the Move the first time you pick one.
 
-Not yet: DecentSampler's effects, on-screen knobs and buttons, and modulators.
+- **The preset's own controls** — its knobs, buttons and menus — are on the module's knobs,
+  named after the preset (or after what they drive, when the preset draws its names in a
+  picture). Layers, mic mixes, envelopes, tuning and volume respond now.
+
+Not yet: DecentSampler's effects (knobs bound to them show up but do nothing yet), and modulators.
 
 ## Using it
 

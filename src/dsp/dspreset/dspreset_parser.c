@@ -182,6 +182,25 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
         if (!strcmp(mode, "memory")) out->playback_mode = DS_PLAYBACK_MEMORY;
         else if (!strcmp(mode, "disk_streaming")) out->playback_mode = DS_PLAYBACK_DISK_STREAMING;
     }
+    {
+        const scope_t *own = &s[depth - 1];
+        static const struct { const char *name; unsigned bit; } owned[] = {
+            {"pan", DS_OWN_PAN}, {"ampVelTrack", DS_OWN_VEL_TRACK}, {"attack", DS_OWN_ATTACK},
+            {"decay", DS_OWN_DECAY}, {"sustain", DS_OWN_SUSTAIN}, {"release", DS_OWN_RELEASE}};
+        char tags[256], text2[64];
+        for (unsigned i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i)
+            if (ds_xml_attribute(own->attrs, own->end, owned[i].name, text2, sizeof(text2))) out->own_mask |= owned[i].bit;
+        out->own_volume = 1.0f;
+        volume_of(own, &out->own_volume);
+        out->base_tuning = number(s, depth, "tuning", 0);
+        out->tags[0] = '\0';
+        for (int i = 0; i < depth; ++i)
+            if (s[i].attrs && ds_xml_attribute(s[i].attrs, s[i].end, "tags", tags, sizeof(tags)) && tags[0]) {
+                size_t len = strlen(out->tags);
+                if (len + strlen(tags) + 2 <= sizeof(out->tags))   /* a tag list that would not fit is dropped whole */
+                    snprintf(out->tags + len, sizeof(out->tags) - len, "%s%.*s", len ? "," : "", (int)(sizeof(out->tags) - len - 2), tags);
+            }
+    }
     if (out->lo_note < 0) out->lo_note = 0;
     if (out->hi_note > 127) out->hi_note = 127;
     if (out->lo_vel < 0) out->lo_vel = 0;
@@ -197,7 +216,7 @@ int ds_dspreset_visit_samples(const char *preset_path,
     long length;
     char *xml, *p;
     scope_t scopes[3];  /* <groups>, <group>, <sample> */
-    int in_groups = 0, in_group = 0, group_enabled = 1, group_index = -1;
+    int in_groups = 0, in_group = 0, group_index = -1;
     unsigned visited = 0, rejected = 0;
     int rc = -1;
     if (!preset_path || !visitor) return -1;
@@ -230,15 +249,14 @@ int ds_dspreset_visit_samples(const char *preset_path,
             if (closing) { in_groups = 0; scopes[0].attrs = NULL; }
             else if (!self_closing) { in_groups = 1; scopes[0] = (scope_t){tag + 6, end}; }
         } else if (tag_is(tag, "group")) {
+            /* Numbered in document order, empty self-closing groups included:
+             * bindings address groups by this index. */
             if (closing) { in_group = 0; scopes[1].attrs = NULL; }
-            else if (!self_closing) {
-                char text[16];
-                in_group = 1; group_index++;
-                scopes[1] = (scope_t){tag + 5, end};
-                group_enabled = !(ds_xml_attribute(tag + 5, end, "enabled", text, sizeof(text)) &&
-                                  (!strcasecmp(text, "false") || !strcmp(text, "0")));
-            }
-        } else if (!closing && tag_is(tag, "sample") && in_groups && in_group && group_enabled) {
+            else if (self_closing) group_index++;
+            else { in_group = 1; group_index++; scopes[1] = (scope_t){tag + 5, end}; }
+        } else if (!closing && tag_is(tag, "sample") && in_groups && in_group) {
+            /* A disabled group still loads: a layer button or menu may switch
+             * it on. Whether it SOUNDS is the preset model's runtime state. */
             ds_dspreset_sample_t sample;
             scopes[2] = (scope_t){tag + 6, end};
             if (build_sample(scopes, 3, group_index, &sample)) { rejected++; continue; }
