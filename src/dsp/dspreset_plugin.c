@@ -162,21 +162,20 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
     dspreset_instance_t *instance = opaque;
     if (!instance || !key || !out || out_len <= 0) return -1;
     if (!strcmp(key, "ui_hierarchy")) {
-        snprintf(out, (size_t)out_len,
+        return snprintf(out, (size_t)out_len,
             "{\"levels\":{\"root\":{\"name\":\"DSPreset\","
             "\"params\":[{\"key\":\"preset_path\",\"name\":\"Library\"},"
             "{\"key\":\"gain\",\"name\":\"Gain\"}],\"knobs\":[\"gain\"]}}}");
     } else if (!strcmp(key, "chain_params")) {
-        snprintf(out, (size_t)out_len,
+        return snprintf(out, (size_t)out_len,
             "[{\"key\":\"preset_path\",\"name\":\"Library\",\"type\":\"filepath\","
             "\"root\":\"/data/UserData\",\"filter\":[\".dspreset\",\".dslibrary\"],\"default\":\"\"},"
             "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\","
             "\"min\":0,\"max\":2,\"step\":0.02,\"default\":0.7}]");
-    } else if (!strcmp(key, "preset_path")) snprintf(out, (size_t)out_len, "%s", instance->preset_path);
-    else if (!strcmp(key, "gain")) snprintf(out, (size_t)out_len, "%.3f", instance->gain);
-    else if (!strcmp(key, "loading")) snprintf(out, (size_t)out_len, "%d", instance->loading);
+    } else if (!strcmp(key, "preset_path")) return snprintf(out, (size_t)out_len, "%s", instance->preset_path);
+    else if (!strcmp(key, "gain")) return snprintf(out, (size_t)out_len, "%.3f", instance->gain);
+    else if (!strcmp(key, "loading")) return snprintf(out, (size_t)out_len, "%d", instance->loading);
     else return -1;
-    return 0;
 }
 
 static int get_error(void *opaque, char *out, int out_len) { dspreset_instance_t *i = opaque; if (!i || !out || out_len <= 0) return -1; snprintf(out, (size_t)out_len, "%s", i->error); return 0; }
