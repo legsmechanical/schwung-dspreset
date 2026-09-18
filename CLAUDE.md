@@ -167,4 +167,6 @@ release). Deleting them is a pending decision, not an oversight.
 ## Format reference
 
 `docs/decentsampler-developer-guide/` — a local copy of the official guide (reference, not
-instructions). `docs/NATIVE_DSPRESET_ARCHITECTURE.md` — the no-SFZ decision and its rules.
+instructions). **It is DecentSampler's copyrighted documentation: excluded via
+`.git/info/exclude`, never committed** — history was rewritten on 2026-09-18 to take it out
+before this repo went public. Re-fetch it from decentsamples.com if the folder is missing. `docs/NATIVE_DSPRESET_ARCHITECTURE.md` — the no-SFZ decision and its rules.

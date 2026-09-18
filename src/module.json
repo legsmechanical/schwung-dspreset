@@ -5,7 +5,7 @@
   "version": "0.3.0",
   "description": "Native DecentSampler DSPreset player with worker-driven disk streaming and DSLibrary import.",
   "author": "legsmechanical",
-  "license": "LGPL-3.0",
+  "license": "MIT",
   "dsp": "dsp.so",
   "api_version": 2,
   "capabilities": {

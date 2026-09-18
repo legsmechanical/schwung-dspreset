@@ -43,4 +43,5 @@ See [`CLAUDE.md`](CLAUDE.md) for the build, the tests and how playback works.
 
 ## License
 
-LGPL-3.0.
+MIT — see [`LICENSE`](LICENSE). Code under `src/dsp/third_party/` (unused by this module, kept from
+the Multisampler fork) carries its own licenses.
