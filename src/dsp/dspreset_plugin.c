@@ -181,8 +181,18 @@ static void render_block(void *opaque, int16_t *out, int frames) {
     for (int i = 0; i < frames * 2; ++i) { float x = buffer[i] * instance->gain; if (x > 1) x = 1; if (x < -1) x = -1; out[i] = (int16_t)(x * 32767); }
 }
 
-int move_plugin_init(const host_api_v1_t *host, plugin_api_v2_t *api) {
+static plugin_api_v2_t g_plugin_api_v2 = {
+    .api_version = MOVE_PLUGIN_API_VERSION_2,
+    .create_instance = create_instance,
+    .destroy_instance = destroy_instance,
+    .on_midi = on_midi,
+    .set_param = set_param,
+    .get_param = get_param,
+    .get_error = get_error,
+    .render_block = render_block,
+};
+
+plugin_api_v2_t *move_plugin_init_v2(const host_api_v1_t *host) {
     (void)host;
-    *api = (plugin_api_v2_t){MOVE_PLUGIN_API_VERSION_2, create_instance, destroy_instance, on_midi, set_param, get_param, get_error, render_block};
-    return 0;
+    return &g_plugin_api_v2;
 }
