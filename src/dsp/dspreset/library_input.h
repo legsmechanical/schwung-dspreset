@@ -16,10 +16,9 @@ typedef enum {
  * that owns a DSPreset and its assets; it is not a substitute preset format. */
 ds_library_input_kind_t ds_classify_library_input(const char *path, int is_directory);
 
-/* Archives are normalized off-device or by a non-real-time import worker
- * before deployment. Move then sees a regular directory tree, allowing all
- * standard ZIP compression methods without putting an archive decoder in the
- * audio streaming path. */
+/* Archives are normalized by a non-real-time import worker. The worker may
+ * run on the desktop installer or on Move after a user selects an archive;
+ * either way, the audio streaming path receives only a regular directory. */
 int ds_library_input_requires_prepare(ds_library_input_kind_t kind);
 
 /* ZIP entry paths are untrusted input. This rejects archive traversal,

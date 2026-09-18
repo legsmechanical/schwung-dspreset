@@ -77,12 +77,15 @@ resolves every asset path from the preset's directory inside the package.
 
 Archive names are untrusted: import rejects absolute paths, traversal, empty
 segments, and `__MACOSX` resource-fork entries. Every accepted `.dslibrary` is
-unpacked once into an ordinary library directory before deployment to Move.
-That keeps the real-time engine independent of ZIP compression methods and
-lets it stream regular WAV/FLAC files directly. The source archive remains
-untouched on the computer; its unpacked on-device copy is the installed
-library. The loaded Capture GO-TO Bass package is the fixture for this
-contract.
+unpacked once into an ordinary library directory by the module's background
+import worker. This can happen on Move immediately after the user selects an
+archive; the UI shows import progress and does not make the preset playable
+until the prepared tree is complete. The real-time engine streams normal
+WAV/FLAC files and never needs ZIP decoding. The source archive remains
+untouched; its unpacked managed-cache copy is the installed library. A desktop
+installer may perform the same preparation as an optimization, but it is not a
+compatibility requirement. The loaded Capture GO-TO Bass package is the fixture
+for this contract.
 
 ## First vertical slice
 
