@@ -161,6 +161,9 @@ static void asimov(plugin_t *p, const char *dir_path) {
                 if (!strstr(params, needle)) { fprintf(stderr, "FAIL ASIMOV control %d is not %s\n", i, want[i]); exit(1); }
             }
             for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+            /* Its Reverb (a 4.6 s room at 80%) would still be ringing from the last
+             * note: take it out for these two checks. At 0 the plate is skipped. */
+            p->api->set_param(p->instance, "ctl_1", "0");
             p->api->set_param(p->instance, "ctl_4", "10");          /* attack 10 s */
             plugin_render(p, out);
             plugin_midi(p, 0x90, 48, 100);

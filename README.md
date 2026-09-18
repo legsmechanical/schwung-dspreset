@@ -20,6 +20,8 @@ source.
   picture). Layers, mic mixes, envelopes, tuning and volume respond now.
 
 - **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
+- **Reverb:** a plate reverb, smoother than the one in DecentSampler, tuned so each preset's
+  reverb settings ring about as long and sit about as loud as they would there.
 
 - **An amp envelope for every preset** on its own page, drawn as an envelope: Attack, Decay,
   Sustain and Release, and an Override switch. Off, they show the preset's own envelope; on,
@@ -27,7 +29,7 @@ source.
 - **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
   with the preset's knobs setting their depth, rate and times.
 
-Not yet: reverb, delay, chorus and the other time-based effects (their knobs show up but do
+Not yet: delay, chorus and the other time-based effects (their knobs show up but do
 nothing yet), and FLAC samples.
 
 ## Using it

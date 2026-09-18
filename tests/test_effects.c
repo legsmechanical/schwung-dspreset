@@ -95,7 +95,7 @@ int main(void) {
     /* wide open / unity / off are exact pass-throughs, not merely close */
     CHECK(response("lowpass", "frequency", 22000, NULL, 0, 15000) == 1.0);
     CHECK(response("peak", "frequency", 1000, "gain", 1, 1000) == 1.0);
-    CHECK(response("reverb", "wetLevel", 1, NULL, 0, 1000) == 1.0);   /* not rendered yet: passes through */
+    CHECK(response("delay", "wetLevel", 1, NULL, 0, 1000) == 1.0);    /* not rendered yet: passes through */
 
     /* in the engine */
     snprintf(path, sizeof(path), "mkdir -p '%s/fx'", dir); CHECK(system(path) == 0);

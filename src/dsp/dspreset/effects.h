@@ -13,13 +13,14 @@
 
 #include "preset_model.h"
 
-enum { DS_FX_BYPASS = 0, DS_FX_BIQUAD, DS_FX_ONEPOLE, DS_FX_GAIN, DS_FX_UNSUPPORTED };
+enum { DS_FX_BYPASS = 0, DS_FX_BIQUAD, DS_FX_ONEPOLE, DS_FX_GAIN, DS_FX_REVERB, DS_FX_UNSUPPORTED };
 
 typedef struct {
     int kind;
     float b0, b1, b2, a1, a2;       /* biquad, normalised by a0 */
     float pole;                     /* one-pole low-pass */
     float gain;                     /* gain effect, linear */
+    float room, damping, wet;       /* reverb: DecentSampler's settings (reverb.c maps them) */
 } ds_fx_coeffs_t;
 
 typedef struct { float z1[2], z2[2]; } ds_fx_state_t;

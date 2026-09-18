@@ -11,3 +11,4 @@ src/dsp/dspreset/wav_source.c
 src/dsp/dspreset/catalog.c
 src/dsp/dspreset/preset_model.c
 src/dsp/dspreset/effects.c
+src/dsp/dspreset/reverb.c

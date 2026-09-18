@@ -223,6 +223,14 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
+    /* An instrument-level reverb gets its plate now (the audio thread never
+     * allocates). A GROUP-level one would be a plate per note, as DecentSampler
+     * runs it — far too heavy here — so it stays off. */
+    for (unsigned x = 0; x < e->model.effect_count; ++x)
+        if (!strcmp(e->model.effects[x].type, "reverb") && e->model.effects[x].group < 0 &&
+            !(e->reverb[x] = ds_reverb_create((float)output_rate))) {
+            fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1;
+        }
     for (unsigned k = 0; k < e->model.modulator_count; ++k) {
         const ds_modulator_t *m = &e->model.modulators[k];
         e->mod_global[k].stage = DS_ENV_DONE;                         /* a global envelope waits for a key */
@@ -247,6 +255,7 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
     for (unsigned i = 0; i < e->source_count; ++i) free(e->sources[i].head);
     for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
     for (int i = 0; i < DS_MAX_VOICES; ++i) free(e->voices[i].ring);
+    for (unsigned x = 0; x < DS_MAX_EFFECTS; ++x) ds_reverb_destroy(e->reverb[x]);
     free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt);
     ds_preset_model_free(&e->model);
     memset(e, 0, sizeof(*e));
@@ -885,7 +894,8 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
             unsigned x = v->fx_index[k];
             chain[k] = &e->fx_coeffs[x];
             if (e->fx_modulated[x]) { modulated_effect(e, x, values, 1, &v->fx_live[k], &v->fx_built[k]); chain[k] = &v->fx_live[k]; }
-            filtering |= chain[k]->kind != DS_FX_BYPASS && chain[k]->kind != DS_FX_UNSUPPORTED;
+            /* (a reverb inside a note is not run: see the load) */
+            filtering |= chain[k]->kind != DS_FX_BYPASS && chain[k]->kind != DS_FX_UNSUPPORTED && chain[k]->kind != DS_FX_REVERB;
         }
         if (!filtering || frames > 256) {
             /* Nothing to run this block (a filter swept wide open): straight out.
@@ -920,7 +930,11 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
         const ds_fx_coeffs_t *c = &e->fx_coeffs[x];
         if (e->model.effects[x].group >= 0) continue;
         if (e->fx_modulated[x]) { modulated_effect(e, x, e->mod_global_value, 0, &e->fx_live[x], &e->fx_live_built[x]); c = &e->fx_live[x]; }
-        ds_fx_process(c, &e->fx_state[x], out_lr, frames);
+        if (c->kind == DS_FX_REVERB) {
+            if (e->reverb[x]) { ds_reverb_set(e->reverb[x], c->room, c->damping, c->wet); ds_reverb_process(e->reverb[x], out_lr, frames); }
+        } else {
+            ds_fx_process(c, &e->fx_state[x], out_lr, frames);
+        }
     }
     if (underruns) atomic_fetch_add_explicit(&e->underruns, underruns, memory_order_relaxed);
     for (int i = 0; i < DS_MAX_VOICES; ++i) e->voices[i].underruns = 0;

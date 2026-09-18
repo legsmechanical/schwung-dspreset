@@ -26,6 +26,14 @@ void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
         c->kind = c->gain == 1.0f ? DS_FX_BYPASS : DS_FX_GAIN;
         return;
     }
+    if (!strcmp(t, "reverb")) {
+        /* DecentSampler's defaults: roomSize 0.7, damping 0.3, wetLevel 0 (silent) */
+        c->room = clampf(ds_fx_param(fx, "roomSize", 0.7f), 0, 1);
+        c->damping = clampf(ds_fx_param(fx, "damping", 0.3f), 0, 1);
+        c->wet = clampf(ds_fx_param(fx, "wetLevel", 0.0f), 0, 1);
+        c->kind = c->wet > 0 ? DS_FX_REVERB : DS_FX_BYPASS;
+        return;
+    }
     if (!strcmp(t, "lowpass_1pl")) {
         freq = ds_fx_param(fx, "frequency", 22000);
         if (freq >= 0.49f * sr) return;

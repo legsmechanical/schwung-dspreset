@@ -97,8 +97,16 @@ gain — JUCE's IIR formulas, since DecentSampler is a JUCE plugin. **Peak gain 
 factor at the centre** (JUCE's `A = sqrt(gain)`), which is why Capture's EQ, on by default,
 adds +4..+11 dB per band and peaks a hard note at ~2.4. A wide-open lowpass, a unity peak and a
 disabled effect are exact pass-throughs. Instrument effects run on the mix; group effects run
-inside each note with fresh state, as DecentSampler does. Reverb, delay, chorus, phaser and
-the rest pass through unchanged until step 3.
+inside each note with fresh state, as DecentSampler does.
+
+**Reverb** (`reverb.c`) is a Dattorro plate written from the 1997 paper, not DecentSampler's
+own JUCE Freeverb. `roomSize` / `damping` / `wetLevel` are MAPPED so the plate rings as long,
+darkens as fast and sits as loud as JUCE's Freeverb at the same settings — fitted with
+`tools/reverb_calibrate.c`, which holds a reference Freeverb (ISC) that never ships: RT60 within
+~1% per roomSize, loudness within +2.3/-0.7 dB. Dry is untouched; `wetLevel` 0 skips it.
+Instrument-level only: a group-level reverb would be a plate per note and stays off. Measured
+on the Move: 7.2 us a block vs Freeverb's 5.9 (per-sample `sinf` had made it 9.4).
+Delay, chorus, phaser and the rest still pass through.
 
 The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 (`test_render` E2). Hard notes through a boosted EQ saturate rather than square off.
@@ -156,12 +164,12 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 
 ## Not implemented yet
 
-Effects step 3
-(PARKED by Josh 2026-09-18): reverb, delay, chorus, phaser (reuse a permissively licensed fleet module,
-never `schwung-drumverb`), convolution, pitch shift, wave shaper/folder, `<modulators>`, `silencedByTags`, xy-pads,
-SAMPLE_START/LOOP bindings, per-sample-tag bindings, loop
-crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers. There is no read-only param type, so load status is logged
-(`dspreset: loaded …` / `load failed …`) and served as the `status` get_param key, not shown.
+Effects: delay, chorus, phaser (reuse a permissively licensed fleet module — never
+`schwung-drumverb`), convolution, pitch shift, wave shaper/folder, group-level reverb.
+Also: per-tag polyphony and `silencedByTags`, xy-pads, SAMPLE_START/LOOP bindings, per-sample-tag
+bindings, loop crossfades, envelope curve shapes, FLAC samples, legato/first triggers,
+musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
+Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 
 ## Build, test, deploy
 
