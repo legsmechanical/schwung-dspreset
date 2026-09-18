@@ -33,9 +33,11 @@ ssh ableton@move.local "mkdir -p /data/UserData/schwung/modules/sound_generators
 echo "Setting permissions..."
 ssh ableton@move.local "chmod -R a+rw /data/UserData/schwung/modules/sound_generators/dspreset"
 
+echo "Restarting Schwung so the native plugin is loaded..."
+"$REPO_ROOT/../scripts/restart_move.sh"
+
 echo ""
 echo "=== Install Complete ==="
 echo "Module installed to: /data/UserData/schwung/modules/sound_generators/dspreset/"
 echo ""
 echo "Load DSPreset files or DSLibrary packages from the Library parameter."
-echo "Restart Schwung with the workspace canonical restart script before loading it."
