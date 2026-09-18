@@ -167,6 +167,16 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
+    for (unsigned k = 0; k < e->model.modulator_count; ++k) {
+        const ds_modulator_t *m = &e->model.modulators[k];
+        e->mod_global[k].stage = DS_ENV_DONE;                         /* a global envelope waits for a key */
+        for (unsigned i = 0; i < m->binding_count; ++i) {
+            const ds_binding_t *b = &e->model.bindings[m->first_binding + i];
+            if (b->target != DS_TARGET_EFFECT) continue;
+            for (unsigned x = 0; x < e->model.effect_count; ++x)
+                if (b->tag_mask ? (e->model.effects[x].tag_mask & b->tag_mask) != 0 : b->effect == (int)x) e->fx_modulated[x] = 1;
+        }
+    }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         e->voices[i].ring = malloc((size_t)DS_RING_FRAMES * 2 * sizeof(float));
         if (!e->voices[i].ring) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
@@ -205,8 +215,8 @@ static int zone_enabled(const ds_native_engine_t *e, const ds_zone_t *z) {
     return 1;
 }
 
-static void zone_now(const ds_native_engine_t *e, const ds_zone_t *z, zone_now_t *out) {
-    const ds_group_settings_t *g = &e->groups_rt[z->def.group_index], *in = &e->instrument_rt;
+static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const ds_group_settings_t *g,
+                          const ds_group_settings_t *in, zone_now_t *out) {
     const ds_dspreset_sample_t *d = &z->def;
     static const unsigned own_env[4] = {DS_OWN_ATTACK, DS_OWN_DECAY, DS_OWN_SUSTAIN, DS_OWN_RELEASE};
     const float def_env[4] = {d->attack, d->decay, d->sustain, d->release};
@@ -220,6 +230,10 @@ static void zone_now(const ds_native_engine_t *e, const ds_zone_t *z, zone_now_t
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
     if (out->pan < -1) out->pan = -1;
     if (out->pan > 1) out->pan = 1;
+}
+
+static void zone_now(const ds_native_engine_t *e, const ds_zone_t *z, zone_now_t *out) {
+    zone_now_from(e, z, &e->groups_rt[z->def.group_index], &e->instrument_rt, out);
 }
 
 static void set_group_value(ds_group_settings_t *g, int target, float v) {
@@ -261,6 +275,16 @@ static void set_effect_value(ds_effect_t *fx, const char *token, float v) {
     }
 }
 
+static void set_modulator_value(ds_modulator_t *m, const char *token, float v) {
+    if (!strcmp(token, "MOD_AMOUNT")) m->mod_amount = v;
+    else if (!strcmp(token, "FREQUENCY")) m->frequency = v < 0 ? 0 : v;
+    else if (!strcmp(token, "ENV_ATTACK")) m->attack = v < 0 ? 0 : v;
+    else if (!strcmp(token, "ENV_DECAY")) m->decay = v < 0 ? 0 : v;
+    else if (!strcmp(token, "ENV_SUSTAIN")) m->sustain = v;
+    else if (!strcmp(token, "ENV_RELEASE")) m->release = v < 0 ? 0 : v;
+    else if (!strcmp(token, "DELAY_TIME")) m->delay = v < 0 ? 0 : v;
+}
+
 static void control_changed(ds_native_engine_t *e, unsigned index, float value, int depth);
 
 static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in_min, float in_max, float value, int depth) {
@@ -270,6 +294,11 @@ static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in
     case DS_TARGET_CONTROL_VALUE:
         if (depth < 2 && b->position >= 0 && b->position < (int)e->model.control_count) control_changed(e, (unsigned)b->position, v, depth + 1);
         return;
+    case DS_TARGET_MODULATOR: {
+        int m = b->position < 0 ? 0 : b->position;
+        if (m < (int)e->model.modulator_count) set_modulator_value(&e->model.modulators[m], b->name, v);
+        return;
+    }
     case DS_TARGET_EFFECT:
         for (unsigned i = 0; i < e->model.effect_count; ++i)
             if (b->tag_mask ? (e->model.effects[i].tag_mask & b->tag_mask) != 0 : (int)i == b->effect) {
@@ -314,6 +343,142 @@ void ds_native_engine_set_control(ds_native_engine_t *e, unsigned index, float v
     if (e && index < e->model.control_count) control_changed(e, index, value, 0);
 }
 
+/* ---- modulators ---------------------------------------------------------
+ * An LFO swings -1..1 around a neutral 0 (CS-20M's vibrato maps it onto
+ * -12..+12 semitones at depth 0.04, which only makes sense two-sided); an
+ * envelope, a CC and velocity run 0..1. modAmount scales that value BEFORE the
+ * binding translates it, as the guide describes depth. Values are taken once
+ * per block, which at 2.9 ms is far finer than any of them move. */
+
+static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+static void mod_start(const ds_modulator_t *m, ds_mod_state_t *st) {
+    st->phase = 0;
+    st->delay_left = m->delay;
+    st->level = m->attack > 0 ? 0.0f : 1.0f;
+    st->stage = m->attack > 0 ? DS_ENV_ATTACK : DS_ENV_DECAY;
+}
+
+static void mod_release(ds_mod_state_t *st) { if (st->stage != DS_ENV_DONE) st->stage = DS_ENV_RELEASE; }
+
+static float mod_value(const ds_native_engine_t *e, const ds_modulator_t *m, const ds_mod_state_t *st, float velocity) {
+    float raw = 0, p = st->phase;
+    switch (m->kind) {
+    case DS_MOD_LFO:
+        if (st->delay_left > 0) return 0;
+        raw = m->shape == DS_LFO_SQUARE ? (p < 0.5f ? 1.0f : -1.0f) :
+              m->shape == DS_LFO_SAW ? 2.0f * p - 1.0f :
+              m->shape == DS_LFO_TRIANGLE ? 1.0f - 4.0f * fabsf(p - 0.5f) :
+              sinf(2.0f * (float)M_PI * p);
+        break;
+    case DS_MOD_ENVELOPE: raw = st->stage == DS_ENV_DONE ? 0 : st->level; break;
+    case DS_MOD_CC: raw = m->cc >= 0 && m->cc < 128 ? e->cc_value[m->cc] : 0; break;
+    default: raw = velocity; break;
+    }
+    return raw * m->mod_amount;
+}
+
+static void mod_advance(const ds_modulator_t *m, ds_mod_state_t *st, unsigned frames, float rate) {
+    float dt = (float)frames / rate, sustain = clamp01(m->sustain);
+    if (m->kind == DS_MOD_LFO) {
+        if (st->delay_left > 0) { st->delay_left -= dt; return; }
+        st->phase += m->frequency * dt;
+        st->phase -= floorf(st->phase);
+    } else if (m->kind == DS_MOD_ENVELOPE) {
+        switch (st->stage) {
+        case DS_ENV_ATTACK:
+            st->level += m->attack > 0 ? dt / m->attack : 1.0f;
+            if (st->level >= 1.0f) { st->level = 1.0f; st->stage = DS_ENV_DECAY; }
+            break;
+        case DS_ENV_DECAY:
+            st->level = sustain + (st->level - sustain) * (m->decay > 0 ? expf(logf(SILENT) * dt / m->decay) : 0.0f);
+            if (fabsf(st->level - sustain) < 1e-4f) { st->level = sustain; st->stage = DS_ENV_SUSTAIN; }
+            break;
+        case DS_ENV_SUSTAIN: st->level = sustain; break;          /* a Sustain knob reaches held notes */
+        case DS_ENV_RELEASE:
+            st->level *= m->release > 0 ? expf(logf(SILENT) * dt / m->release) : 0.0f;
+            if (st->level < SILENT) { st->level = 0; st->stage = DS_ENV_DONE; }
+            break;
+        default: break;
+        }
+    }
+}
+
+static float mod_apply(int behavior, float base, float t, float neutral) {
+    switch (behavior) {
+    case DS_MODB_ADD: return base + t;
+    case DS_MODB_MULTIPLY: return base * t;
+    case DS_MODB_MODULATE: return base + (t - neutral);
+    default: return t;
+    }
+}
+
+/* The translated value `b` delivers for a modulator value, and for neutral. */
+static void mod_translate(const ds_modulator_t *m, const ds_binding_t *b, float value, float *t, float *neutral) {
+    float lo = m->kind == DS_MOD_LFO ? -1.0f : 0.0f;
+    *t = ds_binding_translate(b, lo, 1.0f, value);
+    *neutral = ds_binding_translate(b, lo, 1.0f, 0.0f);
+}
+
+/* Every modulator binding that reaches a note's volume, pitch or pan, applied to
+ * copies of its group's and the instrument's settings. */
+static void voice_mod_settings(const ds_native_engine_t *e, const ds_voice_t *v, const float *values,
+                               ds_group_settings_t *g, ds_group_settings_t *in) {
+    int group = v->zone->def.group_index;
+    for (unsigned k = 0; k < e->model.modulator_count; ++k) {
+        const ds_modulator_t *m = &e->model.modulators[k];
+        for (unsigned i = 0; i < m->binding_count; ++i) {
+            const ds_binding_t *b = &e->model.bindings[m->first_binding + i];
+            ds_group_settings_t *target;
+            float t, n;
+            if (b->target != DS_TARGET_VOLUME && b->target != DS_TARGET_TUNING && b->target != DS_TARGET_PAN) continue;
+            if (b->level == DS_LEVEL_INSTRUMENT) target = in;
+            else if (b->level == DS_LEVEL_GROUP &&
+                     (b->tag_mask ? (e->groups_rt[group].tag_mask & b->tag_mask) != 0 : group == (b->position < 0 ? 0 : b->position)))
+                target = g;
+            else continue;
+            mod_translate(m, b, values[k], &t, &n);
+            if (b->target == DS_TARGET_VOLUME) {
+                target->volume = mod_apply(b->mod_behavior, target->volume, t, n);
+                if (target->volume < 0) target->volume = 0;
+            } else if (b->target == DS_TARGET_TUNING) {
+                target->tuning = mod_apply(b->mod_behavior, target->tuning, t, n);
+            } else {                                                /* pan, in DecentSampler's -100..100 */
+                target->pan = mod_apply(b->mod_behavior, target->pan * 100.0f, t, n) / 100.0f;
+                target->has_pan = 1;
+            }
+        }
+    }
+}
+
+static float effect_param_default(const ds_effect_t *fx, const char *name) {
+    if (!strcmp(name, "frequency")) return !strcmp(fx->type, "peak") || !strcmp(fx->type, "notch") ? 10000 : 22000;
+    if (!strcmp(name, "resonance") || !strcmp(name, "q")) return 0.7f;
+    if (!strcmp(name, "gain")) return 1;
+    return 0;
+}
+
+/* Coefficients for effect `x` with the modulators applied. Only global
+ * modulators reach an instrument effect (`with_voice` = 0). */
+static void modulated_effect(const ds_native_engine_t *e, unsigned x, const float *values, int with_voice, ds_fx_coeffs_t *out) {
+    ds_effect_t fx = e->model.effects[x];
+    for (unsigned k = 0; k < e->model.modulator_count; ++k) {
+        const ds_modulator_t *m = &e->model.modulators[k];
+        if (m->voice_scope && !with_voice) continue;
+        for (unsigned i = 0; i < m->binding_count; ++i) {
+            const ds_binding_t *b = &e->model.bindings[m->first_binding + i];
+            const char *name;
+            float t, n;
+            if (b->target != DS_TARGET_EFFECT) continue;
+            if (b->tag_mask ? !(fx.tag_mask & b->tag_mask) : b->effect != (int)x) continue;
+            if (!(name = effect_attribute(b->name))) continue;
+            mod_translate(m, b, values[k], &t, &n);
+            set_effect_value(&fx, b->name, mod_apply(b->mod_behavior, ds_fx_param(&fx, name, effect_param_default(&fx, name)), t, n));
+        }
+    }
+    ds_fx_prepare(out, &fx, (float)e->output_rate);
+}
+
 static ds_voice_t *allocate_voice(ds_native_engine_t *e) {
     ds_voice_t *best = NULL;
     for (int i = 0; i < DS_MAX_VOICES; ++i) if (!e->voices[i].active) return &e->voices[i];
@@ -346,6 +511,8 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
             memset(&v->fx_state[v->fx_count], 0, sizeof(v->fx_state[0]));
             v->fx_count++;
         }
+    for (unsigned k = 0; k < e->model.modulator_count; ++k)
+        if (e->model.modulators[k].voice_scope) mod_start(&e->model.modulators[k], &v->mods[k]);
     v->note = note; v->velocity = velocity;
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
     v->age = ++e->age_counter;
@@ -387,6 +554,8 @@ static void release_voice(ds_native_engine_t *e, ds_voice_t *v) {
     if (v->env_stage == DS_ENV_ATTACK && v->env_level <= 0.0f)
         v->env_level = v->env_attack_step < 1.0f ? v->env_attack_step : 1.0f;
     v->env_stage = DS_ENV_RELEASE;
+    for (unsigned k = 0; k < e->model.modulator_count; ++k)
+        if (e->model.modulators[k].voice_scope) mod_release(&v->mods[k]);
 }
 
 static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int trigger) {
@@ -421,6 +590,10 @@ static void trigger_zones(ds_native_engine_t *e, int note, int velocity, int tri
 void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
     if (!e || note < 0 || note > 127 || velocity < 0 || velocity > 127) return;
     if (!velocity) { ds_native_engine_note_off(e, note); return; }
+    if (!e->note_velocity[note] && e->keys_held++ == 0)     /* a global envelope starts with the first key */
+        for (unsigned k = 0; k < e->model.modulator_count; ++k)
+            if (!e->model.modulators[k].voice_scope && e->model.modulators[k].kind == DS_MOD_ENVELOPE)
+                mod_start(&e->model.modulators[k], &e->mod_global[k]);
     e->note_velocity[note] = velocity;
     trigger_zones(e, note, velocity, DS_TRIGGER_ATTACK);
 }
@@ -434,12 +607,18 @@ void ds_native_engine_note_off(ds_native_engine_t *e, int note) {
         if (e->sustain_pedal) v->sustained = 1;
         else release_voice(e, v);
     }
-    if (e->note_velocity[note]) trigger_zones(e, note, e->note_velocity[note], DS_TRIGGER_RELEASE);
+    if (e->note_velocity[note]) {
+        trigger_zones(e, note, e->note_velocity[note], DS_TRIGGER_RELEASE);
+        if (e->keys_held && --e->keys_held == 0)                /* ...and releases with the last */
+            for (unsigned k = 0; k < e->model.modulator_count; ++k)
+                if (!e->model.modulators[k].voice_scope) mod_release(&e->mod_global[k]);
+    }
     e->note_velocity[note] = 0;
 }
 
 void ds_native_engine_cc(ds_native_engine_t *e, int cc, int value) {
     if (!e) return;
+    if (cc >= 0 && cc < 128) e->cc_value[cc] = clamp01(value / 127.0f);
     for (unsigned m = 0; m < e->model.cc_count; ++m) {
         const ds_cc_map_t *map = &e->model.ccs[m];
         if (map->cc != cc) continue;
@@ -480,13 +659,12 @@ static inline int fetch(const ds_voice_t *v, uint64_t vf, uint32_t produced, flo
     return 1;
 }
 
-static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsigned frames) {
+static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsigned frames, const zone_now_t *settings) {
     uint32_t produced = packed_produced(atomic_load_explicit(&v->stream, memory_order_acquire));
     double inc;
-    {   /* volume, pan and pitch follow the controls while the note sounds */
-        zone_now_t now;
+    {   /* volume, pan and pitch follow the controls (and modulators) while the note sounds */
+        zone_now_t now = *settings;
         float gain;
-        zone_now(e, v->zone, &now);
         gain = now.gain * (1.0f - now.vel_track + now.vel_track * v->vel);
         v->gain_l = gain * (now.pan > 0 ? 1.0f - now.pan : 1.0f);
         v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
@@ -535,23 +713,52 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
     if (!e || !out_lr) return;
     for (unsigned x = 0; x < e->model.effect_count; ++x)
         if (e->fx_dirty[x]) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)e->output_rate); e->fx_dirty[x] = 0; }
+    for (unsigned k = 0; k < e->model.modulator_count; ++k) {         /* shared modulators: once per block */
+        const ds_modulator_t *m = &e->model.modulators[k];
+        if (m->voice_scope) continue;
+        e->mod_global_value[k] = mod_value(e, m, &e->mod_global[k], 0);
+        mod_advance(m, &e->mod_global[k], frames, (float)e->output_rate);
+    }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];
+        zone_now_t now;
+        float values[DS_MAX_MODULATORS];
         if (!v->active) continue;
+        if (e->model.modulator_count) {
+            ds_group_settings_t g = e->groups_rt[v->zone->def.group_index], in = e->instrument_rt;
+            for (unsigned k = 0; k < e->model.modulator_count; ++k) {
+                const ds_modulator_t *m = &e->model.modulators[k];
+                values[k] = m->voice_scope ? mod_value(e, m, &v->mods[k], v->vel) : e->mod_global_value[k];
+            }
+            voice_mod_settings(e, v, values, &g, &in);
+            zone_now_from(e, v->zone, &g, &in, &now);
+        } else {
+            zone_now(e, v->zone, &now);
+        }
         if (!v->fx_count || frames > 256) {
-            render_voice(e, v, out_lr, frames);
+            render_voice(e, v, out_lr, frames, &now);
         } else {
             float note[2 * 256];
             memset(note, 0, frames * 2 * sizeof(float));
-            render_voice(e, v, note, frames);
-            for (unsigned k = 0; k < v->fx_count; ++k)
-                ds_fx_process(&e->fx_coeffs[v->fx_index[k]], &v->fx_state[k], note, frames);
+            render_voice(e, v, note, frames, &now);
+            for (unsigned k = 0; k < v->fx_count; ++k) {
+                unsigned x = v->fx_index[k];
+                const ds_fx_coeffs_t *c = &e->fx_coeffs[x];
+                if (e->fx_modulated[x]) { modulated_effect(e, x, values, 1, &v->fx_live[k]); c = &v->fx_live[k]; }
+                ds_fx_process(c, &v->fx_state[k], note, frames);
+            }
             for (unsigned k = 0; k < frames * 2; ++k) out_lr[k] += note[k];
         }
+        for (unsigned k = 0; k < e->model.modulator_count; ++k)
+            if (e->model.modulators[k].voice_scope) mod_advance(&e->model.modulators[k], &v->mods[k], frames, (float)e->output_rate);
         underruns += v->underruns;
     }
-    for (unsigned x = 0; x < e->model.effect_count; ++x)
-        if (e->model.effects[x].group < 0) ds_fx_process(&e->fx_coeffs[x], &e->fx_state[x], out_lr, frames);
+    for (unsigned x = 0; x < e->model.effect_count; ++x) {
+        const ds_fx_coeffs_t *c = &e->fx_coeffs[x];
+        if (e->model.effects[x].group >= 0) continue;
+        if (e->fx_modulated[x]) { modulated_effect(e, x, e->mod_global_value, 0, &e->fx_live[x]); c = &e->fx_live[x]; }
+        ds_fx_process(c, &e->fx_state[x], out_lr, frames);
+    }
     if (underruns) atomic_fetch_add_explicit(&e->underruns, underruns, memory_order_relaxed);
     for (int i = 0; i < DS_MAX_VOICES; ++i) e->voices[i].underruns = 0;
 }

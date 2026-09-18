@@ -41,6 +41,11 @@ typedef struct {
 
 enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE };
 
+/* One modulator's running state: an LFO's phase (and its start delay), or an
+ * envelope's stage and level. Held per note for voice-scope modulators and
+ * once in the engine for global ones. Advanced once per block. */
+typedef struct { float phase, level, delay_left; int stage; } ds_mod_state_t;
+
 /* Stream word shared with the worker: generation (16) | zone+1 (16) | produced (32).
  * `produced` is the virtual frame (along the looped play path) the ring holds up
  * to; a zone of 0 means nothing to stream. */
@@ -64,6 +69,8 @@ typedef struct {
     unsigned fx_count;
     unsigned char fx_index[DS_VOICE_FX];
     ds_fx_state_t fx_state[DS_VOICE_FX];
+    ds_fx_coeffs_t fx_live[DS_VOICE_FX];    /* this note's coefficients when a modulator moves the effect */
+    ds_mod_state_t mods[DS_MAX_MODULATORS];
 } ds_voice_t;
 
 typedef struct {
@@ -101,6 +108,16 @@ typedef struct {
     ds_fx_coeffs_t fx_coeffs[DS_MAX_EFFECTS];
     unsigned char fx_dirty[DS_MAX_EFFECTS];
     ds_fx_state_t fx_state[DS_MAX_EFFECTS];
+    /* Modulators: shared state for global ones, their value this block, the
+     * last value of every CC (for <midiCC>), keys held (a global envelope
+     * gates on the first key down and the last key up), and which effects any
+     * modulator reaches (only those pay for per-block coefficients). */
+    ds_mod_state_t mod_global[DS_MAX_MODULATORS];
+    float mod_global_value[DS_MAX_MODULATORS];
+    float cc_value[128];
+    unsigned keys_held;
+    unsigned char fx_modulated[DS_MAX_EFFECTS];
+    ds_fx_coeffs_t fx_live[DS_MAX_EFFECTS];
 } ds_native_engine_t;
 
 /* Loading is worker-only: parses XML, opens files, reads every resident head.

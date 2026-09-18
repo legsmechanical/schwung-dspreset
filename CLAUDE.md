@@ -97,6 +97,23 @@ the rest pass through unchanged until step 3.
 The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 (`test_render` E2). Hard notes through a boosted EQ saturate rather than square off.
 
+## Modulators
+
+`<lfo>`, `<envelope>`, `<midiCC>`, `<midiVelocity>` in `preset_model.c`; run in
+`native_engine.c`, once per 128-frame block. Per note (`scope="voice"`, the default for all
+but LFOs) or shared (`global`; a shared envelope keys on the first key down and releases on the
+last up). **An LFO swings −1..1 around a neutral 0; the rest run 0..1. `modAmount` scales the
+value BEFORE the binding translates it** — both readings of the guide; the second is unconfirmed
+against DecentSampler itself (an A/B recording would settle it). `modBehavior` add / multiply /
+set (the default) / modulate (delta from the translated neutral).
+
+Targets: group/instrument volume, tuning and pan (re-read every block), and effect parameters —
+an effect any modulator reaches (`fx_modulated`) gets its coefficients rebuilt per block: per
+note for group effects (`voice.fx_live`), shared for instrument effects (global modulators
+only). Controls bound `type="modulator"` move a modulator's MOD_AMOUNT, FREQUENCY and envelope
+times live. Not yet: musical_time LFO rates, envelope curves, tag-level and sample-level
+modulation targets, modulating a modulator.
+
 ## Defaults DecentSampler does not document
 
 `modVolume` on a group (undocumented; what the DecentSampler app saves) multiplies the group's
@@ -108,8 +125,7 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 
 ## Not implemented yet
 
-**`<modulators>` (LFOs, envelopes)** — 5 of CS-20M's 21 presets rest their filters at 33 Hz
-and open them only with an envelope, so they are near-silent without it. Effects step 3
+Effects step 3
 (PARKED by Josh 2026-09-18): reverb, delay, chorus, phaser (reuse a permissively licensed fleet module,
 never `schwung-drumverb`), convolution, pitch shift, wave shaper/folder, `<modulators>`, `silencedByTags`, xy-pads,
 SAMPLE_START/LOOP bindings, per-sample-tag bindings, loop

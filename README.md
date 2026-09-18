@@ -21,9 +21,11 @@ source.
 
 - **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
 
+- **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
+  with the preset's knobs setting their depth, rate and times.
+
 Not yet: reverb, delay, chorus and the other time-based effects (their knobs show up but do
-nothing yet), modulators (LFOs and envelopes — synth-style presets that sweep their filter with
-one play closed), and FLAC samples.
+nothing yet), and FLAC samples.
 
 ## Using it
 

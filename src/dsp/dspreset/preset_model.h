@@ -14,6 +14,7 @@
 #define DS_MAX_EFFECT_PARAMS 12
 #define DS_MAX_TABLE 64
 #define DS_MAX_EFFECTS 64
+#define DS_MAX_MODULATORS 16
 
 enum { DS_CONTROL_KNOB = 0, DS_CONTROL_BUTTON, DS_CONTROL_MENU };
 enum { DS_LEVEL_INSTRUMENT = 0, DS_LEVEL_GROUP, DS_LEVEL_TAG, DS_LEVEL_UI, DS_LEVEL_OTHER };
@@ -25,7 +26,14 @@ enum {
     DS_TARGET_ENABLED,
     DS_TARGET_CONTROL_VALUE,          /* level ui: set another control */
     DS_TARGET_EFFECT,                 /* type effect: an <effects> parameter */
+    DS_TARGET_MODULATOR,              /* type modulator: a modulator's own setting */
 };
+
+/* How a modulator's value lands on its target (DecentSampler's modBehavior;
+ * its default is set). */
+enum { DS_MODB_SET = 0, DS_MODB_ADD, DS_MODB_MULTIPLY, DS_MODB_MODULATE };
+enum { DS_MOD_LFO = 0, DS_MOD_ENVELOPE, DS_MOD_CC, DS_MOD_VELOCITY };
+enum { DS_LFO_SINE = 0, DS_LFO_SQUARE, DS_LFO_SAW, DS_LFO_TRIANGLE };
 
 typedef struct {
     int target, level;
@@ -40,7 +48,17 @@ typedef struct {
     int table_n;
     float table_in[DS_MAX_TABLE], table_out[DS_MAX_TABLE];   /* Capture's cutoff table has 21 */
     float fixed;                      /* fixed_value, numeric (true = 1, "-6dB" -> linear when a volume) */
+    int mod_behavior;                 /* bindings under a modulator */
 } ds_binding_t;
+
+/* One <lfo>, <envelope>, <midiCC> or <midiVelocity>. The settings here are
+ * LIVE: controls bound to them (type="modulator") write into the engine's copy. */
+typedef struct {
+    int kind, voice_scope, shape, cc;
+    float frequency, mod_amount, delay;
+    float attack, decay, sustain, release;
+    unsigned first_binding, binding_count;
+} ds_modulator_t;
 
 typedef struct { char name[32]; unsigned first_binding, binding_count; } ds_choice_t;
 
@@ -91,6 +109,8 @@ typedef struct {
     unsigned cc_count;
     ds_effect_t *effects;
     unsigned effect_count;
+    ds_modulator_t modulators[DS_MAX_MODULATORS];
+    unsigned modulator_count;
 } ds_preset_model_t;
 
 int ds_preset_model_load(ds_preset_model_t *model, const char *preset_path, char *error, unsigned error_len);

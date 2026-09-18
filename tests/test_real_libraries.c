@@ -224,6 +224,19 @@ static void cs20m(const char *bundle) {
     plugin_midi(&p, 0x80, 48, 0);
     printf("  Blue Moon (AIFF) note 48: %.4f, at 2 s %.4f\n", level, late);
     CHECK(level > 0.01 && late > 0.001 && plugin_uint(&p, "underruns") == 0);
+    for (int b = 0; b < 400 && plugin_uint(&p, "voices"); ++b) plugin_render(&p, out);
+    /* 12 Buzzy Bass rests its filters at 33 Hz: only its envelope modulator opens them */
+    p.api->set_param(p.instance, "preset", "11");
+    plugin_get(&p, "preset_name", name, sizeof(name));
+    CHECK(!strcmp(name, "12 Buzzy Bass"));
+    for (int i = 0; i < 500; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
+    clock_gettime(CLOCK_MONOTONIC, &p.next);
+    level = 0;
+    plugin_midi(&p, 0x90, 36, 110);
+    for (int b = 0; b < 100; ++b) { plugin_render(&p, out); if (b >= 10) level += rms(out, BLOCK * 2) / 90; }
+    plugin_midi(&p, 0x80, 36, 0);
+    printf("  Buzzy Bass (filter opened by its envelope): %.4f\n", level);
+    CHECK(level > 0.01);
     plugin_close(&p);
 }
 

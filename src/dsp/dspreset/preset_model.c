@@ -103,6 +103,7 @@ float ds_binding_translate(const ds_binding_t *b, float in_min, float in_max, fl
 
 static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(type, "effect")) return DS_TARGET_EFFECT;
+    if (!strcmp(type, "modulator")) return DS_TARGET_MODULATOR;
     if (!strcmp(param, "VALUE") && (!strcmp(level, "ui") || !strcmp(type, "control"))) return DS_TARGET_CONTROL_VALUE;
     if (!strcmp(param, "AMP_VOLUME") || !strcmp(param, "TAG_VOLUME")) return DS_TARGET_VOLUME;
     if (!strcmp(param, "GLOBAL_TUNING") || !strcmp(param, "GROUP_TUNING") || !strcmp(param, "TUNING")) return DS_TARGET_TUNING;
@@ -166,6 +167,13 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
             ++q;
         }
     }
+    b->mod_behavior = DS_MODB_SET;
+    if (attr(a, e, "modBehavior", text, sizeof(text))) {
+        if (!strcmp(text, "add")) b->mod_behavior = DS_MODB_ADD;
+        else if (!strcmp(text, "multiply")) b->mod_behavior = DS_MODB_MULTIPLY;
+        else if (!strcmp(text, "modulate")) b->mod_behavior = DS_MODB_MODULATE;
+    }
+    if (b->target == DS_TARGET_MODULATOR && attr_num(a, e, "modulatorIndex", &f)) b->position = (int)f;
     if (attr(a, e, "translationValue", text, sizeof(text))) {
         char *tail;
         if (!strcasecmp(text, "true")) b->fixed = 1;
@@ -216,7 +224,8 @@ static const char *alias(const char *p) {
         {"FX_DRIVE", "Drive"}, {"FX_OUTPUT_LEVEL", "Level"}, {"ENV_ATTACK", "Attack"}, {"ENV_DECAY", "Decay"},
         {"ENV_SUSTAIN", "Sustain"}, {"ENV_RELEASE", "Release"}, {"AMP_VOLUME", "Volume"}, {"TAG_VOLUME", "Volume"},
         {"GLOBAL_TUNING", "Tune"}, {"GROUP_TUNING", "Tune"}, {"TUNING", "Tune"}, {"PAN", "Pan"},
-        {"ENABLED", "On"}, {"TAG_ENABLED", "On"}, {"AMP_VEL_TRACK", "Vel Sens"}};
+        {"ENABLED", "On"}, {"TAG_ENABLED", "On"}, {"AMP_VEL_TRACK", "Vel Sens"},
+        {"MOD_AMOUNT", "Mod Amt"}, {"FREQUENCY", "Rate"}, {"DELAY_TIME", "Delay"}};
     for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); ++i) if (!strcmp(p, table[i].param)) return table[i].label;
     return NULL;
 }
@@ -267,7 +276,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     long length;
     char *xml, *p, *w;
     int in_ui = 0, in_midi = 0, in_mod = 0, in_effects = 0, in_group = 0;
-    int ctrl = -1, choice = -1, cc = -1, group = -1;
+    int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1;
     memset(m, 0, sizeof(*m));
     group_settings(&m->instrument, NULL, NULL, 1);
     if (!(file = fopen(path, "rb")) || fseek(file, 0, SEEK_END) || (length = ftell(file)) < 0 ||
@@ -307,7 +316,39 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
 
         if (tag_is(tag, "ui")) { in_ui = !closing && !self_closing; continue; }
         if (tag_is(tag, "midi")) { in_midi = !closing && !self_closing; continue; }
-        if (tag_is(tag, "modulators")) { in_mod = !closing && !self_closing; continue; }
+        if (tag_is(tag, "modulators")) { in_mod = !closing && !self_closing; modulator = -1; continue; }
+        if (in_mod && (tag_is(tag, "lfo") || tag_is(tag, "envelope") || tag_is(tag, "midiCC") || tag_is(tag, "midiVelocity"))) {
+            ds_modulator_t *mod;
+            char text[32];
+            float v;
+            if (closing) { modulator = -1; continue; }
+            if (m->modulator_count == DS_MAX_MODULATORS) continue;
+            mod = &m->modulators[m->modulator_count];
+            memset(mod, 0, sizeof(*mod));
+            mod->kind = tag_is(tag, "lfo") ? DS_MOD_LFO : tag_is(tag, "envelope") ? DS_MOD_ENVELOPE :
+                        tag_is(tag, "midiCC") ? DS_MOD_CC : DS_MOD_VELOCITY;
+            /* scope: LFOs default to one shared instance, the rest to one per note */
+            mod->voice_scope = mod->kind != DS_MOD_LFO;
+            if (attr(a, end, "scope", text, sizeof(text))) mod->voice_scope = !strcmp(text, "voice");
+            mod->shape = DS_LFO_SINE;
+            if (attr(a, end, "shape", text, sizeof(text))) {
+                if (!strcmp(text, "square")) mod->shape = DS_LFO_SQUARE;
+                else if (!strcmp(text, "saw")) mod->shape = DS_LFO_SAW;
+                else if (!strcmp(text, "triangle")) mod->shape = DS_LFO_TRIANGLE;
+            }
+            mod->frequency = attr_num(a, end, "frequency", &v) ? v : 1;
+            mod->mod_amount = attr_num(a, end, "modAmount", &v) ? v : 1;
+            mod->delay = attr_num(a, end, "delayTime", &v) ? v : 0;
+            mod->attack = attr_num(a, end, "attack", &v) ? v : 0;
+            mod->decay = attr_num(a, end, "decay", &v) ? v : 0;
+            mod->sustain = attr_num(a, end, "sustain", &v) ? v : 1;
+            mod->release = attr_num(a, end, "release", &v) ? v : 0;
+            mod->cc = attr_num(a, end, "number", &v) ? (int)v : -1;
+            mod->first_binding = m->binding_count;
+            modulator = self_closing ? -1 : (int)m->modulator_count;
+            m->modulator_count++;
+            continue;
+        }
         if (tag_is(tag, "effects")) { in_effects = !closing && !self_closing; continue; }
         if (tag_is(tag, "groups")) { if (!closing) group_settings(&m->instrument, a, end, 1); continue; }
         if (tag_is(tag, "group")) {
@@ -394,6 +435,11 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 cc = self_closing ? -1 : (int)m->cc_count;
                 m->cc_count++;
             }
+            continue;
+        }
+        if (!closing && tag_is(tag, "binding") && in_mod && modulator >= 0 && m->binding_count < MAX_BINDINGS) {
+            parse_binding(m, a, end, &m->bindings[m->binding_count++]);
+            m->modulators[modulator].binding_count++;
             continue;
         }
         if (!closing && tag_is(tag, "binding") && !in_mod && m->binding_count < MAX_BINDINGS) {
