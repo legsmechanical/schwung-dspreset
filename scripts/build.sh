@@ -31,16 +31,12 @@ echo "Cross prefix: $CROSS_PREFIX"
 
 mkdir -p build dist/dspreset
 
-# Compile the direct XML/region/WAV/cache engine and its V2 wrapper.
+# Compile the direct XML/region/WAV/stream engine and its V2 wrapper.
+# tests/run.sh reads this same list, so the tests build what ships.
+DSP_SOURCES="$(cat "$SCRIPT_DIR/dsp_sources.txt")"
 echo ""
 echo "=== Compiling DSP plugin ==="
-for src in src/dsp/dspreset_plugin.c \
-           src/dsp/dspreset/native_engine.c src/dsp/dspreset/region_map.c \
-           src/dsp/dspreset/dspreset_parser.c src/dsp/dspreset/library_input.c \
-           src/dsp/dspreset/library_preparer.c src/dsp/dspreset/zip_index.c \
-           src/dsp/dspreset/zip_extract.c \
-           src/dsp/dspreset/voice.c src/dsp/dspreset/page_cache.c \
-           src/dsp/dspreset/wav_source.c; do
+for src in $DSP_SOURCES; do
     obj="build/$(basename "$src" .c).o"
     ${CROSS_PREFIX}gcc -O3 -fPIC \
         -march=armv8-a -mtune=cortex-a72 \
@@ -54,10 +50,7 @@ done
 echo "=== Linking dsp.so ==="
 ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -march=armv8-a -mtune=cortex-a72 \
-    build/dspreset_plugin.o build/native_engine.o build/region_map.o \
-    build/dspreset_parser.o build/library_input.o build/library_preparer.o \
-    build/zip_index.o build/zip_extract.o build/voice.o \
-    build/page_cache.o build/wav_source.o \
+    $(for src in $DSP_SOURCES; do echo "build/$(basename "$src" .c).o"; done) \
     -o build/dsp.so \
     -lm -lpthread ${ZLIB_LINK:--lz}
 

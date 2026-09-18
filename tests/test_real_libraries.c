@@ -1,0 +1,142 @@
+/* Real libraries through the real plugin at real-time pace. Paths come from
+ * DSPRESET_CAPTURE (the .dspreset) and DSPRESET_ASIMOV_DIR (folder of
+ * .dspreset files); tests/run.sh refuses to run without them. */
+#include "test_support.h"
+
+#include <dirent.h>
+
+#include "../src/dsp/dspreset/wav_source.h"
+
+#define BLOCK 128
+#define GAIN 0.7f
+
+/* Descriptors this process holds: the Move host's soft limit is 1024, shared. */
+static int open_fds(void) {
+    DIR *d = opendir("/dev/fd");
+    int n = 0;
+    CHECK(d);
+    while (readdir(d)) n++;
+    closedir(d);
+    return n;
+}
+
+static double rms(const int16_t *x, unsigned n) {
+    double s = 0;
+    for (unsigned i = 0; i < n; ++i) s += (double)x[i] * x[i];
+    return sqrt(s / n) / 32768.0;
+}
+
+/* Capture: note 35, velocity 100, first hit = round-robin 1, hard layer:
+ * GO-TO_..._hard_DI_B0_35.wav from frame 1000 (inherited <groups start>),
+ * scaled by velocity (ampVelTrack 1) -- checked frame by frame. */
+static void capture(plugin_t *p, const char *preset) {
+    char status[256], wav[1024], error[128];
+    const char *slash = strrchr(preset, '/');
+    ds_wav_source_t src;
+    static float file[44100 * 3];
+    int16_t out[BLOCK * 2];
+    unsigned frames, blocks, worst = 0;
+    plugin_load(p, preset, status, sizeof(status));
+    printf("  status: %s\n", status);
+    CHECK(!strcmp(status, "Capture GO-TO Bass.dspreset: 564 zones"));
+    printf("  open descriptors after loading 540 files: %d\n", open_fds());
+    CHECK(open_fds() < 40);
+
+    snprintf(wav, sizeof(wav), "%.*s/Samples/DI Samples/GO-TO_Bass_5string_0fret_hard_DI_B0_35.wav",
+             (int)(slash - preset), preset);
+    CHECK(ds_wav_source_open(&src, wav, error, sizeof(error)) == 0);
+    frames = (unsigned)(src.frame_count - 1001 < 44100 * 3 ? src.frame_count - 1001 : 44100 * 3);
+    CHECK(ds_wav_source_read_frames(&src, 1000, file, frames, error, sizeof(error)) == (int)frames);
+    ds_wav_source_close(&src);
+    CHECK(frames > 16384 + 44100);                     /* the comparison crosses into the stream */
+
+    plugin_midi(p, 0x90, 35, 100);
+    blocks = frames / BLOCK;
+    for (unsigned b = 0; b < blocks; ++b) {
+        plugin_render(p, out);
+        for (unsigned i = 0; i < BLOCK; ++i) {
+            int16_t want = expected_out(file[b * BLOCK + i] * (100 / 127.0f), GAIN);
+            unsigned diff = (unsigned)abs(out[2 * i] - want);
+            if (diff > worst) worst = diff;
+            if (diff > 1 || out[2 * i] != out[2 * i + 1]) {
+                fprintf(stderr, "FAIL capture frame %u: got %d/%d want %d\n", b * BLOCK + i, out[2 * i], out[2 * i + 1], want);
+                exit(1);
+            }
+        }
+    }
+    plugin_midi(p, 0x80, 35, 0);
+    printf("  Capture note 35: %u frames match the file (worst %u LSB)\n", blocks * BLOCK, worst);
+
+    /* round robin: the next three hits pick different files */
+    for (int hit = 0; hit < 3; ++hit) {
+        plugin_midi(p, 0x90, 35, 100);
+        for (int i = 0; i < 40; ++i) plugin_render(p, out);
+        CHECK(rms(out, BLOCK * 2) > 0.001);
+        plugin_midi(p, 0x80, 35, 0);
+        for (int i = 0; i < 60; ++i) plugin_render(p, out);
+    }
+    /* every note in the playable range sounds */
+    for (int n = 33; n <= 79; n += 1) {
+        double level = 0;
+        plugin_midi(p, 0x90, (uint8_t)n, 90);
+        for (int i = 0; i < 8; ++i) { plugin_render(p, out); level += rms(out, BLOCK * 2); }
+        plugin_midi(p, 0x80, (uint8_t)n, 0);
+        if (level < 0.001) { fprintf(stderr, "FAIL capture note %d silent\n", n); exit(1); }
+    }
+    for (int i = 0; i < 100; ++i) plugin_render(p, out);
+    CHECK(plugin_uint(p, "underruns") == 0);
+    printf("  open descriptors after 50 notes: %d\n", open_fds());
+    CHECK(open_fds() < 40 + 64);
+}
+
+static int by_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+/* ASIMOV: every preset loads, and a held note still sounds 3 s in (its
+ * samples sustain on the loops stored in the WAV files). */
+static void asimov(plugin_t *p, const char *dir_path) {
+    DIR *dir = opendir(dir_path);
+    struct dirent *entry;
+    char *names[64];
+    int count = 0;
+    CHECK(dir);
+    while ((entry = readdir(dir)) != NULL && count < 64) {
+        size_t len = strlen(entry->d_name);
+        if (len > 9 && !strcmp(entry->d_name + len - 9, ".dspreset")) names[count++] = strdup(entry->d_name);
+    }
+    closedir(dir);
+    CHECK(count == 15);
+    qsort(names, (size_t)count, sizeof(names[0]), by_name);
+    for (int k = 0; k < count; ++k) {
+        char path[1024], status[256];
+        int16_t out[BLOCK * 2];
+        double early = 0, late = 0;
+        snprintf(path, sizeof(path), "%s/%s", dir_path, names[k]);
+        plugin_load(p, path, status, sizeof(status));
+        CHECK(strstr(status, ": 11 zones") && !strstr(status, "missing"));
+        plugin_midi(p, 0x90, 48, 100);
+        for (int b = 0; b < (int)(3.0 * 44100 / BLOCK); ++b) {
+            plugin_render(p, out);
+            if (b >= 20 && b < 60) early += rms(out, BLOCK * 2);
+            if (b >= 990) late += rms(out, BLOCK * 2);
+        }
+        plugin_midi(p, 0x80, 48, 0);
+        printf("  %-28s early %.4f  at 3 s %.4f\n", names[k], early / 40, late / (1033 - 990));
+        CHECK(early > 0.01 && late > 0.001);
+        for (int b = 0; b < 400 && plugin_uint(p, "voices"); ++b) plugin_render(p, out);
+        free(names[k]);
+    }
+    CHECK(plugin_uint(p, "underruns") == 0);
+}
+
+int main(void) {
+    const char *capture_path = getenv("DSPRESET_CAPTURE");
+    const char *asimov_dir = getenv("DSPRESET_ASIMOV_DIR");
+    plugin_t p;
+    CHECK(capture_path && asimov_dir);
+    plugin_open(&p);
+    capture(&p, capture_path);
+    asimov(&p, asimov_dir);
+    plugin_close(&p);
+    puts("real library test passed");
+    return 0;
+}

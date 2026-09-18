@@ -35,9 +35,8 @@ DSPreset XML
     -> Move plugin adapter
 ```
 
-Only the bottom sample-source layer may reuse code from xsynth. Its streamed
-source, resident attack head, background I/O worker, source-rate conversion,
-and optional `.x44c` cache are useful primitives. SFZ region parsing,
+No layer uses xsynth: the sample source (resident head, per-voice stream,
+worker I/O, rate conversion) is native. SFZ region parsing,
 synthetic MIDI-CC mappings, SFZ effect semantics, preset scanning, automatic
 gain, and its user interface are not part of this module's design.
 
@@ -92,12 +91,9 @@ single atomic rename publishes `ready`. A failed or interrupted extraction is
 discarded and never appears in the preset browser. Retrying begins a new import
 from the untouched archive.
 
-## First vertical slice
+## Status (2026-09-17)
 
-1. Parse the root, `groups`, `group`, `sample`, and `binding` elements with
-   correct inheritance and path resolution.
-2. Resolve playback policy, key/velocity zones, loop points, and round robin
-   into native regions.
-3. Feed those regions to a direct xsynth streaming-source adapter.
-4. Validate native render output with the existing fixture corpus and Move
-   on-device tests.
+The first slice is built: direct parse with inheritance, native zones, resident heads plus
+per-voice streaming along the loop path, envelopes, round robin, and `.dslibrary` import. None of
+it borrows from xsynth — the streaming layer is native too. How it works, what is not implemented
+yet, and how it is tested: `CLAUDE.md`.

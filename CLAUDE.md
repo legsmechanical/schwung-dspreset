@@ -1,159 +1,91 @@
 # CLAUDE.md
 
-## Project Overview
+## What this is
 
-Multisampler module for Move Anything. Plays SFZ (.sfz) and DecentSampler
-(.dspreset) libraries. Engine: a fork of [xsynth](https://github.com/arduano/xsynth)
-(LGPL-3.0) with Move-specific changes — disk streaming, voice-side SRC,
-DecentSampler→SFZ conversion, denormal flush, soft-clip output, auto-gain.
+**DSPreset** (module id `dspreset`): a native player for DecentSampler `.dspreset` presets and
+`.dslibrary` packages on Ableton Move, for Schwung (stock) and dbxhost/dAVEBOx alike —
+`sound_generators/` is shared between the two installs on the device.
 
-Was sfizz through v0.4.x; rewritten on xsynth for v0.5.0+. The on-device
-module id stays `sfz` for seamless upgrades from old SFZ Player installs;
-user-facing name is "Multisampler".
+It reads the preset XML **directly** into a native zone table. There is **no SFZ step** and no
+xsynth at runtime. This repo was forked from `charlesvestal/schwung-sfz` (Multisampler); much of
+that tree is still here and is **not built** — see *Vestigial* below.
 
-## Build Commands
+## Layout (what ships)
+
+`scripts/dsp_sources.txt` is the one list of compiled files — `scripts/build.sh` and
+`tests/run.sh` both read it, so the tests build exactly what ships.
+
+| file | job |
+|---|---|
+| `src/dsp/dspreset_plugin.c` | API v2 wrapper. Worker thread: loads presets, unpacks `.dslibrary`, streams. Swaps engines atomically and frees the old one once no audio call holds it. |
+| `src/dsp/dspreset/dspreset_parser.c` | XML → zones. `<groups>` → `<group>` → `<sample>` inheritance; volumes multiply, `groupTuning` adds; whitespace around `=`, entities and comments are handled. |
+| `src/dsp/dspreset/native_engine.c` | Zones, resident heads, per-voice stream rings, envelopes, round robin, render. |
+| `src/dsp/dspreset/wav_source.c` | WAV reader (PCM16/24/32, float32, EXTENSIBLE), block `pread`s, the file's own `smpl` loop. |
+| `src/dsp/dspreset/{library_*,zip_*}.c` | `.dslibrary` → `<file>.dslibrary.unpacked/`, transactionally. |
+
+## How playback works (the part that is easy to break)
+
+- **Every file's first `DS_HEAD_FRAMES` (16384) frames are resident.** A note starts from memory
+  the instant it is triggered. Files up to 2× that are kept whole.
+- **Each voice has a ring** the worker fills along the *play path* — "virtual frames", with the
+  loop unrolled — so a loop that lies beyond the head streams exactly like the rest.
+- **Underrun holds, never skips.** If the worker is behind, the voice waits; it does not advance.
+  `test_engine_stall` pins this.
+- **The stream word** (`generation | zone | produced`, one 64-bit atomic) is how the worker and
+  the audio thread agree. The worker publishes with a CAS, so a fill for a voice that was
+  restarted meanwhile is discarded.
+- **File descriptors:** files are closed once their head is read; the worker reopens one per
+  streaming voice (≤ 64). The Move host process's soft limit is **1024**, shared with everything
+  else — a library of 540 files kept open broke it. `test_real_libraries` pins the count.
+- Audio thread: no I/O, no allocation, no locks. Ring pages are touched at load.
+
+## Defaults DecentSampler does not document
+
+Release 0.5 s when a preset sets none (the old Multisampler's finding: a near-zero release cuts
+pianos off). A file's `smpl` loop is used unless `loopEnabled="false"`. Attack 0, decay 0,
+sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrack` t (default 1).
+
+## Not implemented yet
+
+Effects (`<effects>`), `<ui>` knob/button bindings, `<modulators>`, tags/`silencedByTags`, loop
+crossfades, envelope curve shapes, FLAC/AIFF samples, legato/first triggers, choosing among
+several presets inside one `.dslibrary` (the natural-order first loads; a `.dspreset` inside
+`.unpacked/` can be picked directly). There is no read-only param type, so load status is logged
+(`dspreset: loaded …` / `load failed …`) and served as the `status` get_param key, not shown.
+
+## Build, test, deploy
 
 ```bash
-./scripts/build.sh      # Build with Docker (cross-compiles xsynth-core + plugin)
-./scripts/install.sh    # Deploy to Move
+tests/run.sh                          # native build + every test; see the header for fixtures
+./scripts/build.sh                    # ARM64 package -> dist/dspreset-module.tar.gz
+./scripts/install.sh                  # deploy + clean Move restart
 ```
 
-## Structure
+`tests/run.sh` fails on a missing tool or fixture. The real-library test needs
+`DSPRESET_CAPTURE` (Capture GO-TO Bass .dspreset) and `DSPRESET_ASIMOV_DIR` (folder of the 15
+ASIMOV presets); `DSPRESET_ALLOW_MISSING_FIXTURES=1` makes it a named SKIP. Libraries are never
+committed. `tests/test_render.c` checks output **sample-for-sample** against synthetic files at
+real-time pace through the real plugin — keep new tests at that standard.
 
-```
-src/
-  module.json                       # Module metadata
-  ui.js                             # JavaScript UI
-  help.json                         # On-device help
-  dsp/
-    xsynth_plugin.c                 # Plugin wrapper around xsynth-shim
-    dspreset_to_xsynth_sfz.{c,h}    # DecentSampler → SFZ converter
-    third_party/
-      xsynth/                       # Forked xsynth (LGPL-3.0)
-      xsynth_shim/                  # C ABI shim around xsynth-core
-      sfizz/                        # Vestigial; not built (kept for diff/reference)
+Cross-build: `scripts/build.sh` expects `move-anything-sfz-builder`, whose bullseye Dockerfile no
+longer builds (see its header). What works (2026-09-17):
+
+```bash
+docker run --rm -v "$PWD:/build" -w /build -e CROSS_PREFIX=aarch64-linux-gnu- \
+  -e ZLIB_LINK=/usr/lib/aarch64-linux-gnu/libz.so.1 move-anything-builder ./scripts/build.sh
 ```
 
-## Streaming + .x44c cache
+That is gcc 11.4 / glibc 2.35; the Move runs glibc 2.41 and ships `libz.so.1`, so it loads. Check
+a binary's compiler with `strings build/dsp.so | grep '^GCC:'`.
 
-Samples larger than the resident head buffer are streamed off disk. Each
-sample picks one of two `SampleLayout` variants at load time
-(`src/dsp/third_party/xsynth/core/src/soundfont/streaming.rs`):
+## Vestigial (not built, kept from the Multisampler fork)
 
-- `Flac` — direct from `.flac`. No prebake required. Voice spawn primes
-  the head buffer via a Symphonia FLAC decode pass; per-voice CPU cost
-  during play. 48k FLACs use the streaming SRC path to hit Move's 44.1k.
-- `Separated` — backed by a `.x44c` cache file alongside the source
-  audio. Pre-decoded PCM at 44.1k, channels stored contiguously. Stream
-  reads are raw `read()`s with no decode and no SRC.
+`src/dsp/{sfz_plugin,xsynth_plugin,dspreset_to_xsynth_sfz}.c`, `src/dsp/third_party/`
+(sfizz, xsynth submodules), `src/ui.js`, `bench/`, most of `tools/`, `docs/plans/`,
+`.github/workflows/release.yml` and `release.json` (both still point at the Multisampler
+release). Deleting them is a pending decision, not an oversight.
 
-`.x44c` files are an optional perf cache, not a requirement. Build them
-off-device with the `prebake_cache` binary
-(`src/dsp/third_party/xsynth/core/src/bin/prebake_cache.rs`) when a
-specific library shows CPU pressure under high polyphony or release
-tails — otherwise ship FLAC-only.
+## Format reference
 
-## Instrument Organization
-
-`instruments/` is scanned recursively (up to 5 levels) into a single flat
-preset list. Each top-level entry maps to one "instrument" (a library or
-loose file), and every `.sfz` / `.dspreset` inside becomes one preset
-belonging to that instrument.
-
-- Examples:
-  - `Cosmos/COSMOS.dspreset` → instrument "Cosmos", 1 preset
-  - `Raw Violin/{Pad,Granular Pad,Harmonic Pad,Raw Violin}.dspreset` →
-    instrument "Raw Violin", 4 presets
-  - `K4Coll-1.01/K4-Acoustic/K4-Acoustic.dspreset` (and ~60 siblings) →
-    instrument "K4Coll-1.01", 60 presets
-  - `DS - The Synths/DS_The Synths/*.dspreset` → instrument "DS - The Synths",
-    45 presets
-- Normal L/R scrolls the flat preset list across all libraries. Shift+L/R
-  jumps to the next/previous library's first preset. Each preset loads with
-  `dirname(preset.path)` as the sample-resolution root.
-
-## DecentSampler Conversion Spec Adherence
-
-`.dspreset` files are converted to SFZ at load time by
-`convert_dspreset_to_sfz` in `src/dsp/dspreset_to_xsynth_sfz.c`. Spec source:
-the official
-[DecentSampler Developers Guide](https://decentsampler-developers-guide.readthedocs.io/).
-
-**Supported (verified against docs):**
-- `<sample>` mapping: `rootNote` / `loNote` / `hiNote` / `loVel` / `hiVel` /
-  `start` / `end` / `tuning` / `pan` / `loopEnabled` / `loopStart` / `loopEnd`
-- `<group>` ADSR: `attack` (0–10s), `decay` (0–25s), `sustain` (0–1 ratio),
-  `release` (0–25s); `volume` (linear 0–16 or `NdB`); `ampVelTrack` (0–1)
-- `<groups>` wrapper attrs propagate to `<global>`
-- Round-robin: `seqMode="round_robin"` + `seqPosition` → SFZ `seq_length`/`seq_position`
-- Effects (xsynth-native only):
-  - `lowpass` / `lowpass_4pl` → region `cutoff` / `fil_type=lpf_2p`/`lpf_4p` / `resonance`. Defaults: 22000 Hz, Q=0.7.
-  - `reverb` → xsynth's reverb bus on bus `fx1` with proper wet/dry crossfade via `directtomain` / `fx1tomain`. Defaults: room=0.7, damping=0.3, **wet=0**.
-  - `gain` → `global_volume` (in dB).
-- UI knob default values: `<control>`/`<labeled-knob>` `value=` is applied to
-  the bound parameter at load time, with `factor=` and
-  `translation="linear"`/`"table"` (with `translationTable=`) honored.
-- **Dynamic per-preset knob mapping**: every supported `<labeled-knob>` /
-  `<control>` in the dspreset is enumerated at convert time and exposed as a
-  Move parameter (`knob_0`…`knob_15`). The first `DS_KNOB_LIVE_COUNT-2` knobs
-  (default 6, after `octave_transpose` + `gain`) join the live encoder row;
-  every knob shows in the params menu. Each knob owns one synthetic MIDI CC
-  (allocated from 102..117) and the converter emits `<param>_oncc<N>=delta`
-  opcodes for every supported binding inside the control — a single knob can
-  drive multiple xsynth targets when its dspreset has multiple `<binding>`
-  children (e.g. WörliTzer's "Line" knob driving group positions 1 AND 5).
-  Runtime: `set_param("knob_3", "0.75")` calls
-  `xsynth_send_hdcc` through the shim — zero glitch, sample-accurate. Knob
-  position resets to the dspreset's `value=` on every preset load (no
-  per-preset persistence yet).
-- AMP_VOLUME-on-group knobs claim the group's amplitude — the static
-  `modVolume`/`group_amp_db` contribution is skipped (would double-attenuate
-  on top of the CC-driven amplitude).
-- Knobs targeting `FX_REVERB_WET_LEVEL` stay static-at-load (no CC binding) —
-  the static reverb path crossfades via `directtomain`/`fx1tomain` and a CC
-  on `reverb_wet` would multiply against that crossfade.
-- Knobs whose every binding hits an unsupported target (FX_DELAY_*, FX_CHORUS_*,
-  parameterName= per-tag bars, etc.) are skipped entirely — the UI doesn't
-  show a knob that can't move sound.
-- MIDI CC bindings (`<midi><cc>`): emit `<param>_oncc<N>` opcodes with
-  the load-time CC value derived from the target knob's `value=`. `level=ui`
-  bindings chain through the target control's own translation. Degenerate
-  bindings (zero delta) are skipped.
-- Sample paths: Windows backslashes normalized to `/`.
-
-**Not supported / partially supported:**
-- ADSR defaults are **not documented in DS docs**. We fall back to
-  `ampeg_release=0.5` when no release is set anywhere (otherwise xsynth's
-  ~1ms cuts piano samples abruptly). Known guess.
-- `level="tag"` bindings (with `<tags>` element + `tags="..."` on groups)
-  collapse to global parameters. Per-tag mixing not honored.
-- Effects without xsynth equivalents: `delay`, `chorus`, `phaser`,
-  `pitch_shift`, `convolution`, `wave_folder`, `wave_shaper`,
-  `stereo_simulator`, `bit_crusher`. (Use the ecosystem's chain modules
-  — CloudSeed, SpaceEcho, Junologue Chorus, etc. — after the Multisampler.)
-- `<modulators>` (LFOs, envelopes, MIDI CC modulators, MPE, random) — none
-  honored.
-- `<button>` / button-state bindings, animations, `<note>` and `<velocity>`
-  modulators inside `<midi>`, X-Y pads, oscillators, FM6 operators.
-- Group-level bindings other than ADSR (per-group volume/pan/tuning).
-- Filter `Q` (DS 0–5) → SFZ `resonance` (dB) — passed through with the
-  hand-built Q→dB conversion (see commit dd737b4). Within typical
-  author-set values it's roughly OK.
-- `attackCurve` / `decayCurve` / `releaseCurve` — xsynth uses linear curves.
-- Extended filter types: `lowpass_1pl`, `notch`, `peak`, `bandpass`,
-  `highpass` — `lpf_2p`/`lpf_4p` are the only filters we emit today.
-
-**Standalone test tool:** there's a converter CLI at `/tmp/dstest/dsconvert`
-(rebuilt from `/tmp/dstest/dsconvert.c` which copies the converter functions
-out of `dspreset_to_xsynth_sfz.c` plus a tiny `main`) for inspecting
-converted SFZ without deploying. Pull the official DS examples to
-`/tmp/dstest/dspresets/` to verify behavior.
-
-## DSP Plugin API
-
-Standard Move Anything plugin_api_v2 (implemented in `src/dsp/xsynth_plugin.c`):
-- `on_load()`: Initialize xsynth synth via the shim, scan instruments
-- `on_midi()`: Forward MIDI to xsynth-shim
-- `set_param()`: Set instrument_index, preset, gain, octave_transpose, knob_0..15
-- `get_param()`: Get instrument/preset info, state
-- `render_block()`: Render 128 frames stereo via xsynth-shim
+`docs/decentsampler-developer-guide/` — a local copy of the official guide (reference, not
+instructions). `docs/NATIVE_DSPRESET_ARCHITECTURE.md` — the no-SFZ decision and its rules.

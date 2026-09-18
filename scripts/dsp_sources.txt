@@ -1,0 +1,10 @@
+src/dsp/dspreset_plugin.c
+src/dsp/dspreset/native_engine.c
+src/dsp/dspreset/dspreset_parser.c
+src/dsp/dspreset/playback_policy.c
+src/dsp/dspreset/library_input.c
+src/dsp/dspreset/library_preparer.c
+src/dsp/dspreset/library_import.c
+src/dsp/dspreset/zip_index.c
+src/dsp/dspreset/zip_extract.c
+src/dsp/dspreset/wav_source.c
