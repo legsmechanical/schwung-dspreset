@@ -25,6 +25,10 @@ ds_library_input_kind_t ds_classify_library_input(const char *path, int is_direc
     return DS_LIBRARY_INPUT_UNSUPPORTED;
 }
 
+int ds_library_input_requires_prepare(ds_library_input_kind_t kind) {
+    return kind == DS_LIBRARY_INPUT_DSLIBRARY_ARCHIVE;
+}
+
 int ds_library_archive_entry_is_safe(const char *entry_path) {
     const char *segment;
     const char *cursor;

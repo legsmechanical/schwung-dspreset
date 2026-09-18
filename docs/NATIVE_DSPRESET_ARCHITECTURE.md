@@ -75,12 +75,14 @@ relative assets. The loader accepts a directory, a standalone `.dspreset`, or
 a `.dslibrary` as three library roots. It selects the package's DSPreset and
 resolves every asset path from the preset's directory inside the package.
 
-Archive names are untrusted: extraction/indexing rejects absolute paths,
-traversal, empty segments, and `__MACOSX` resource-fork entries. Stored WAV
-entries can be exposed to the streamed-source layer by their archive offsets;
-compressed entries are materialized once into the module's disposable cache,
-never beside or in place of the user's package. The loaded Capture GO-TO Bass
-package is the fixture for this contract.
+Archive names are untrusted: import rejects absolute paths, traversal, empty
+segments, and `__MACOSX` resource-fork entries. Every accepted `.dslibrary` is
+unpacked once into an ordinary library directory before deployment to Move.
+That keeps the real-time engine independent of ZIP compression methods and
+lets it stream regular WAV/FLAC files directly. The source archive remains
+untouched on the computer; its unpacked on-device copy is the installed
+library. The loaded Capture GO-TO Bass package is the fixture for this
+contract.
 
 ## First vertical slice
 
