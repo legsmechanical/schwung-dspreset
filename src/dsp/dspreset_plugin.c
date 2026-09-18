@@ -228,7 +228,8 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
                  next->zone_count - next->missing_zones, next->zone_count, next->missing_files);
     else
         snprintf(status, sizeof(status), "%s: %u zones", name, next->zone_count);
-    if (in->restore_path[0] && !strcmp(in->restore_path, path)) {
+    int restoring = in->restore_path[0] && !strcmp(in->restore_path, path);
+    if (restoring) {
         /* A restored project: put its controls back before anyone hears it. */
         const char *q = in->restore_controls;
         for (unsigned i = 0; i < next->model.control_count && *q; ++i) {
@@ -242,6 +243,9 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
         in->restore_path[0] = '\0';
     }
     atomic_store(&in->ctl_dirty, 0);
+    /* A preset CHOSEN starts with Override off (Josh, 2026-09-18); a project
+     * reopening keeps the Override it was saved with. */
+    if (!restoring) atomic_store(&in->amp_on, 0);
     if (!atomic_load(&in->amp_on)) {          /* Override off: the knobs show the preset's own envelope */
         float env[4];
         if (ds_native_engine_preset_envelope(next, env))

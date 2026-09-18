@@ -106,6 +106,8 @@ on knob 1 they straddled the row break and both hosts drew four faders — every
 green. `tests/test_pages.mjs` lays the pages out with the hosts' own planner
 (`DSPRESET_PAGES_DIR`) and fails if the envelope is not drawn.
 
+**Choosing a preset turns Override off** (Josh, 2026-09-18); a project reopening keeps the
+Override it was saved with (`restoring` in `load_target`).
 Override off: the preset's envelope plays, and after each load the knobs are set to it (from its
 first playable zone), so switching On changes nothing until a knob moves. On: the knobs REPLACE
 the preset's values — even a `<sample>`'s own — so releases can be lengthened. Zones with no amp

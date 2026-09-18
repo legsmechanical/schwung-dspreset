@@ -31,6 +31,8 @@ int main(void) {
     CHECK(dir);
     snprintf(path, sizeof(path), "mkdir -p '%s/amp/instruments/Amp'", dir); CHECK(system(path) == 0);
     snprintf(path, sizeof(path), "%s/amp/instruments/Amp/tone.wav", dir); write_sine24(path, 30000, 5000, 0.5);
+    snprintf(path, sizeof(path), "%s/amp/instruments/Amp/p2.dspreset", dir);
+    write_text(path, "<DecentSampler><groups attack=\"0\" release=\"1.25\"><group><sample path=\"tone.wav\" rootNote=\"60\"/></group></groups></DecentSampler>");
     snprintf(path, sizeof(path), "%s/amp/instruments/Amp/p.dspreset", dir); write_text(path, PRESET);
     CHECK(ds_native_engine_load(&e, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
 
@@ -135,8 +137,20 @@ int main(void) {
         CHECK(strstr(state, "\"amp\":\"1;0;0;1;5\""));
         plugin_open_in(&q, mod);
         q.api->set_param(q.instance, "state", state);
-        CHECK(plugin_uint(&q, "amp_override") == 1);
+        for (int i = 0; i < 300 && plugin_uint(&q, "load_count") == 0; ++i) usleep(10000);
+        CHECK(plugin_uint(&q, "load_count") == 1);
+        CHECK(plugin_uint(&q, "amp_override") == 1);        /* still on AFTER its preset loaded */
         plugin_get(&q, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "5.0000"));
+        /* choosing ANOTHER preset turns Override off, and the knobs show the new
+         * preset's envelope (p2: release 1.25 s) */
+        p.api->set_param(p.instance, "preset", "1");
+        for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
+        CHECK(plugin_uint(&p, "load_count") == 2);
+        CHECK(plugin_uint(&p, "amp_override") == 0);
+        plugin_get(&p, "amp_release", value, sizeof(value)); CHECK(!strcmp(value, "1.2500"));
+        p.api->set_param(p.instance, "preset", "0");
+        for (int i = 0; i < 300; ++i) { usleep(10000); if (i > 30 && !plugin_uint(&p, "is_loading")) break; }
+        clock_gettime(CLOCK_MONOTONIC, &p.next);
         /* Off again: the preset's own envelope comes back */
         p.api->set_param(p.instance, "amp_override", "0");
         plugin_midi(&p, 0x90, 60, 127);
