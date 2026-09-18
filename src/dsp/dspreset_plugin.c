@@ -5,8 +5,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include "dspreset/library_input.h"
+#include "dspreset/library_preparer.h"
 #include "dspreset/native_engine.h"
 
 #define MOVE_PLUGIN_API_VERSION_2 2
@@ -37,6 +41,49 @@ static void retire_engine(dspreset_instance_t *instance, ds_native_engine_t *eng
     node->engine = engine; node->next = instance->retired; instance->retired = node;
 }
 
+static int has_suffix(const char *path, const char *suffix) {
+    size_t path_len = strlen(path), suffix_len = strlen(suffix);
+    return path_len >= suffix_len && !strcmp(path + path_len - suffix_len, suffix);
+}
+
+static int find_preset(const char *directory, char *out, size_t out_len) {
+    DIR *dir = opendir(directory);
+    struct dirent *entry;
+    if (!dir) return -1;
+    while ((entry = readdir(dir)) != NULL) {
+        char path[1024]; struct stat st;
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name) >= (int)sizeof(path) ||
+            lstat(path, &st)) continue;
+        if (S_ISDIR(st.st_mode) && !find_preset(path, out, out_len)) { closedir(dir); return 0; }
+        if (S_ISREG(st.st_mode) && has_suffix(path, ".dspreset") &&
+            snprintf(out, out_len, "%s", path) < (int)out_len) { closedir(dir); return 0; }
+    }
+    closedir(dir); return -1;
+}
+
+static int prepare_input(const char *request, char *preset_path, size_t preset_len,
+                         char *error, unsigned error_len) {
+    ds_library_input_kind_t kind = ds_classify_library_input(request, 0);
+    if (kind == DS_LIBRARY_INPUT_PRESET_FILE) {
+        return snprintf(preset_path, preset_len, "%s", request) >= (int)preset_len ? -1 : 0;
+    }
+    if (kind == DS_LIBRARY_INPUT_DSLIBRARY_ARCHIVE) {
+        char destination[1024]; struct stat st; ds_library_prepare_result_t result;
+        if (snprintf(destination, sizeof(destination), "%s.unpacked", request) >= (int)sizeof(destination)) return -1;
+        if (stat(destination, &st)) {
+            if (ds_library_prepare_archive(request, destination, &result, error, error_len)) return -1;
+        } else if (!S_ISDIR(st.st_mode)) {
+            snprintf(error, error_len, "%s", "DSLibrary cache path is not a directory"); return -1;
+        }
+        if (find_preset(destination, preset_path, preset_len)) {
+            snprintf(error, error_len, "%s", "prepared DSLibrary has no DSPreset"); return -1;
+        }
+        return 0;
+    }
+    snprintf(error, error_len, "%s", "unsupported library input"); return -1;
+}
+
 static void *engine_worker(void *opaque) {
     dspreset_instance_t *instance = opaque;
     while (instance->worker_running) {
@@ -49,7 +96,9 @@ static void *engine_worker(void *opaque) {
         pthread_mutex_unlock(&instance->request_lock);
         if (request[0]) {
             ds_native_engine_t *next = calloc(1, sizeof(*next));
-            if (!next || ds_native_engine_load(next, request, error, sizeof(error))) {
+            char preset_path[1024] = {0};
+            if (!next || prepare_input(request, preset_path, sizeof(preset_path), error, sizeof(error)) ||
+                ds_native_engine_load(next, preset_path, error, sizeof(error))) {
                 if (next) { ds_native_engine_destroy(next); free(next); }
                 set_error(instance, error[0] ? error : "cannot load DSPreset");
             } else {

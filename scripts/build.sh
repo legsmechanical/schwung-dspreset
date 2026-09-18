@@ -37,6 +37,8 @@ echo "=== Compiling DSP plugin ==="
 for src in src/dsp/dspreset_plugin.c \
            src/dsp/dspreset/native_engine.c src/dsp/dspreset/region_map.c \
            src/dsp/dspreset/dspreset_parser.c src/dsp/dspreset/library_input.c \
+           src/dsp/dspreset/library_preparer.c src/dsp/dspreset/zip_index.c \
+           src/dsp/dspreset/zip_extract.c \
            src/dsp/dspreset/voice.c src/dsp/dspreset/page_cache.c \
            src/dsp/dspreset/wav_source.c; do
     obj="build/$(basename "$src" .c).o"
@@ -52,7 +54,8 @@ echo "=== Linking dsp.so ==="
 ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -march=armv8-a -mtune=cortex-a72 \
     build/dspreset_plugin.o build/native_engine.o build/region_map.o \
-    build/dspreset_parser.o build/library_input.o build/voice.o \
+    build/dspreset_parser.o build/library_input.o build/library_preparer.o \
+    build/zip_index.o build/zip_extract.o build/voice.o \
     build/page_cache.o build/wav_source.o \
     -o build/dsp.so \
     -lm -lpthread -lz
