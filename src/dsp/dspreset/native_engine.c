@@ -235,9 +235,14 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     e->instrument_rt = e->model.instrument;
     for (unsigned i = 0; i < e->zone_count; ++i) {
         e->zones[i].tag_mask = ds_preset_model_tag_mask(&e->model, e->zones[i].def.tags);
+        e->zones[i].silenced_by = ds_preset_model_tag_mask(&e->model, e->zones[i].def.silenced_by);
         if (e->zones[i].def.group_index >= (int)e->model.group_count) { e->zones[i].source = -1; }
     }
-    for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { e->tag_volume[t] = 1.0f; e->tag_enabled[t] = 1; }
+    for (unsigned t = 0; t < DS_MAX_TAGS; ++t) {
+        e->tag_volume[t] = e->model.tag_volume[t];
+        e->tag_enabled[t] = e->model.tag_enabled[t];
+        e->tag_polyphony[t] = e->model.tag_polyphony[t];
+    }
     /* Controls start at the preset's values, and fire (DecentSampler's
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
@@ -298,7 +303,7 @@ static float coef_for(float seconds, unsigned rate) {
  * A zone's volume, pitch, pan and envelope come from its own attributes where
  * it sets them, else its group's LIVE settings, else the instrument's — so a
  * control bound to a group or the instrument moves everything that inherits. */
-typedef struct { float gain, pan, vel_track, env[4]; double tuning; } zone_now_t;
+typedef struct { float gain, pan, vel_track, env[4], key_track, silencing_decay; int silencing_mode; double tuning; } zone_now_t;
 
 static int zone_enabled(const ds_native_engine_t *e, const ds_zone_t *z) {
     uint64_t tags = z->tag_mask;
@@ -320,6 +325,11 @@ static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const
     out->vel_track = (d->own_mask & DS_OWN_VEL_TRACK) ? d->amp_vel_track : g->has_vel_track ? g->vel_track : in->vel_track;
     for (int i = 0; i < 4; ++i)
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
+    out->key_track = (d->own_mask & DS_OWN_KEY_TRACK) ? d->pitch_key_track : g->has_key_track ? g->key_track : in->key_track;
+    out->silencing_mode = (d->own_mask & DS_OWN_SILENCING_MODE) ? d->silencing_mode :
+                          g->has_silencing_mode ? g->silencing_mode : in->silencing_mode;
+    out->silencing_decay = (d->own_mask & DS_OWN_SILENCING_DECAY) ? d->silencing_decay :
+                           g->has_silencing_decay ? g->silencing_decay : in->silencing_decay;
     for (int i = 0; i < 4; ++i)                                  /* the module's envelope, where set, wins */
         if (e->amp_override[i] >= 0) out->env[i] = e->amp_override[i];
     if (out->pan < -1) out->pan = -1;
@@ -339,6 +349,9 @@ static void set_group_value(ds_group_settings_t *g, int target, float v) {
     case DS_TARGET_ATTACK: case DS_TARGET_DECAY: case DS_TARGET_SUSTAIN: case DS_TARGET_RELEASE:
         g->env[target - DS_TARGET_ATTACK] = v < 0 ? 0 : v; g->has_env[target - DS_TARGET_ATTACK] = 1; break;
     case DS_TARGET_ENABLED: g->enabled = v >= 0.5f; break;
+    case DS_TARGET_KEY_TRACK: g->key_track = v < 0 ? 0 : v > 1 ? 1 : v; g->has_key_track = 1; break;
+    case DS_TARGET_SILENCING_MODE: g->silencing_mode = v >= 0.5f ? DS_SILENCE_NORMAL : DS_SILENCE_FAST; g->has_silencing_mode = 1; break;
+    case DS_TARGET_SILENCING_DECAY: g->silencing_decay = v < 0 ? 0 : v; g->has_silencing_decay = 1; break;
     default: break;
     }
 }
@@ -407,6 +420,7 @@ static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in
             if (!(b->tag_mask & (1ull << t))) continue;
             if (b->target == DS_TARGET_VOLUME) e->tag_volume[t] = v < 0 ? 0 : v;
             else if (b->target == DS_TARGET_ENABLED) e->tag_enabled[t] = v >= 0.5f;
+            else if (b->target == DS_TARGET_TAG_POLYPHONY) e->tag_polyphony[t] = v >= 1 ? (int)lrintf(v) : -1;
         }
     } else if (b->level == DS_LEVEL_GROUP) {
         for (unsigned g = 0; g < e->model.group_count; ++g)
@@ -612,8 +626,12 @@ static ds_voice_t *allocate_voice(ds_native_engine_t *e) {
     return best;
 }
 
+static void make_way(ds_native_engine_t *e, const ds_zone_t *z);
+
 static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int one_shot) {
-    ds_voice_t *v = allocate_voice(e);
+    ds_voice_t *v;
+    make_way(e, z);
+    v = allocate_voice(e);
     const ds_source_t *s = &e->sources[z->source];
     const ds_dspreset_sample_t *d = &z->def;
     zone_now_t now;
@@ -686,15 +704,62 @@ static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int not
            velocity >= z->def.lo_vel && velocity <= z->def.hi_vel;
 }
 
+/* The one way a voice is cut short: over `decay` seconds when that is set,
+ * else by its own release ("normal"), else in 5 ms ("fast": immediate, without
+ * the click of a jump to zero). It stops counting toward any limit. */
+static void silence_voice(ds_native_engine_t *e, ds_voice_t *v, int mode, float decay) {
+    if (v->env_stage == DS_ENV_DONE) return;
+    if (decay <= 0 && mode == DS_SILENCE_NORMAL) {
+        release_voice(e, v);
+    } else {
+        if (v->env_stage == DS_ENV_ATTACK && v->env_level <= 0.0f) v->env_level = v->env_attack_step < 1.0f ? v->env_attack_step : 1.0f;
+        v->env_release_coef = coef_for(decay > 0 ? decay : 0.005f, e->output_rate);
+        v->env_stage = DS_ENV_RELEASE;
+    }
+    v->key_down = 0;
+    v->sustained = 0;
+    v->choked = 1;
+}
+
+/* A voice silenced by another sample, with its OWN silencing settings. */
+static void silence_by_zone(ds_native_engine_t *e, ds_voice_t *v) {
+    zone_now_t now;
+    zone_now(e, v->zone, &now);
+    silence_voice(e, v, now.silencing_mode, now.silencing_decay);
+}
+
 /* Fades every voice of note `id` out in 5 ms and stops counting it. */
 static void choke_note(ds_native_engine_t *e, uint32_t id) {
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];
         if (!v->active || v->one_shot || v->note_id != id) continue;
-        if (v->env_stage == DS_ENV_ATTACK && v->env_level <= 0.0f) v->env_level = v->env_attack_step < 1.0f ? v->env_attack_step : 1.0f;
-        v->env_release_coef = coef_for(0.005f, e->output_rate);
-        v->env_stage = DS_ENV_RELEASE;
-        v->choked = 1;
+        silence_voice(e, v, DS_SILENCE_FAST, 0);
+    }
+}
+
+/* Before zone `z` starts: stop what it silences (silencedByTags) and make room
+ * under each of its tags' voice limits, oldest first. Voices of the note
+ * being started are left alone, so one key's layers never cut each other. */
+static void make_way(ds_native_engine_t *e, const ds_zone_t *z) {
+    for (int i = 0; i < DS_MAX_VOICES; ++i) {
+        ds_voice_t *v = &e->voices[i];
+        if (v->active && !v->choked && v->note_id != e->note_counter && (v->zone->silenced_by & z->tag_mask))
+            silence_by_zone(e, v);
+    }
+    for (unsigned t = 0; t < e->model.tag_count; ++t) {
+        if (!(z->tag_mask & (1ull << t)) || e->tag_polyphony[t] < 1) continue;
+        for (;;) {
+            ds_voice_t *oldest = NULL;
+            int count = 0;
+            for (int i = 0; i < DS_MAX_VOICES; ++i) {
+                ds_voice_t *v = &e->voices[i];
+                if (!v->active || v->choked || v->note_id == e->note_counter || !(v->zone->tag_mask & (1ull << t))) continue;
+                count++;
+                if (!oldest || v->age < oldest->age) oldest = v;
+            }
+            if (count < e->tag_polyphony[t]) break;
+            silence_by_zone(e, oldest);
+        }
     }
 }
 
@@ -829,7 +894,7 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         v->gain_l = gain * (now.pan > 0 ? 1.0f - now.pan : 1.0f);
         v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
         v->inc = ((double)v->src->file.sample_rate / e->output_rate) *
-                 pow(2.0, (v->note - v->zone->def.root_note + now.tuning) / 12.0);
+                 pow(2.0, ((v->note - v->zone->def.root_note) * now.key_track + now.tuning) / 12.0);
         /* A Sustain moved while the note is held: glide there (never a jump). */
         if (v->zone->def.amp_env_enabled && (v->env_stage == DS_ENV_DECAY || v->env_stage == DS_ENV_SUSTAIN)) {
             float target = now.env[2] < 0 ? 0 : now.env[2] > 1 ? 1 : now.env[2];

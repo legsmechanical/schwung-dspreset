@@ -182,11 +182,22 @@ Release 0.5 s when a preset sets none (the old Multisampler's finding: a near-ze
 pianos off). A file's `smpl` loop is used unless `loopEnabled="false"`. Attack 0, decay 0,
 sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrack` t (default 1).
 
+## Voices that stop voices
+
+`silence_voice()` in `native_engine.c` is the ONE way a voice is cut short — the module note
+limit, `silencedByTags` choke groups and `<tag polyphony>` limits all go through it:
+`silencingDecay` > 0 wins, else `silencingMode` normal = the voice's own release, fast = 5 ms
+(not an instant zero: that clicks). The settings are the VICTIM's (sample → group →
+instrument, live by binding). `make_way()` runs before every voice starts and never touches
+voices of the note being started, so one key's layers cannot cut each other. `<tags><tag>` now
+sets a tag's starting volume, on/off and voice limit (the oldest voice goes first).
+`pitchKeyTrack` scales the key's distance from the root (0 = root pitch everywhere).
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
 delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
-Also: per-tag polyphony and `silencedByTags`, xy-pads, SAMPLE_START/LOOP bindings, per-sample-tag
+Also: xy-pads, SAMPLE_START/LOOP bindings, per-sample-tag
 bindings, loop crossfades, envelope curve shapes, FLAC samples, legato/first triggers,
 musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).

@@ -27,6 +27,10 @@ typedef struct {
     int loop_enabled;               /* 1 / 0, or -1 = not set (use the file's own loop) */
     int64_t loop_start, loop_end;   /* frames; -1 = not set */
     ds_playback_mode_t playback_mode;
+    float pitch_key_track;          /* 0..1: 0 = every key plays the root pitch */
+    char silenced_by[256];          /* silencedByTags: a sample carrying one of these stops this one */
+    int silencing_mode;             /* DS_SILENCE_FAST / DS_SILENCE_NORMAL */
+    float silencing_decay;          /* seconds; > 0 overrides the mode */
 
     /* For live controls: what the <sample> element sets ITSELF, so a group- or
      * instrument-level binding can override everything else without touching
@@ -41,7 +45,10 @@ typedef struct {
 enum {
     DS_OWN_PAN = 1u << 0, DS_OWN_VEL_TRACK = 1u << 1, DS_OWN_ATTACK = 1u << 2,
     DS_OWN_DECAY = 1u << 3, DS_OWN_SUSTAIN = 1u << 4, DS_OWN_RELEASE = 1u << 5,
+    DS_OWN_KEY_TRACK = 1u << 6, DS_OWN_SILENCING_MODE = 1u << 7, DS_OWN_SILENCING_DECAY = 1u << 8,
 };
+
+enum { DS_SILENCE_FAST = 0, DS_SILENCE_NORMAL };
 
 typedef int (*ds_dspreset_sample_visitor_t)(const ds_dspreset_sample_t *sample, void *context);
 

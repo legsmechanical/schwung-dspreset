@@ -114,6 +114,10 @@ static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(param, "ENV_SUSTAIN")) return DS_TARGET_SUSTAIN;
     if (!strcmp(param, "ENV_RELEASE")) return DS_TARGET_RELEASE;
     if (!strcmp(param, "ENABLED") || !strcmp(param, "TAG_ENABLED")) return DS_TARGET_ENABLED;
+    if (!strcmp(param, "PITCH_KEY_TRACK")) return DS_TARGET_KEY_TRACK;
+    if (!strcmp(param, "SILENCING_MODE")) return DS_TARGET_SILENCING_MODE;
+    if (!strcmp(param, "SILENCING_DECAY")) return DS_TARGET_SILENCING_DECAY;
+    if (!strcmp(param, "TAG_POLYPHONY")) return DS_TARGET_TAG_POLYPHONY;
     return DS_TARGET_NONE;
 }
 
@@ -176,8 +180,8 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     if (b->target == DS_TARGET_MODULATOR && attr_num(a, e, "modulatorIndex", &f)) b->position = (int)f;
     if (attr(a, e, "translationValue", text, sizeof(text))) {
         char *tail;
-        if (!strcasecmp(text, "true")) b->fixed = 1;
-        else if (!strcasecmp(text, "false")) b->fixed = 0;
+        if (!strcasecmp(text, "true") || !strcasecmp(text, "normal")) b->fixed = 1;   /* normal: SILENCING_MODE */
+        else if (!strcasecmp(text, "false") || !strcasecmp(text, "fast")) b->fixed = 0;
         else {
             b->fixed = strtof(text, &tail);
             while (isspace((unsigned char)*tail)) ++tail;
@@ -208,7 +212,12 @@ static void group_settings(ds_group_settings_t *g, const char *a, const char *e,
         g->has_env[i] = a && attr_num(a, e, env_names[i], &g->env[i]);
         if (instrument) g->has_env[i] = 1;
     }
-    if (instrument) g->has_pan = g->has_vel_track = 1;
+    g->key_track = 1;
+    g->has_key_track = a && attr_num(a, e, "pitchKeyTrack", &g->key_track);
+    g->has_silencing_mode = a && attr(a, e, "silencingMode", text, sizeof(text));
+    g->silencing_mode = g->has_silencing_mode && !strcasecmp(text, "normal") ? DS_SILENCE_NORMAL : DS_SILENCE_FAST;
+    g->has_silencing_decay = a && attr_num(a, e, "silencingDecay", &g->silencing_decay);
+    if (instrument) g->has_pan = g->has_vel_track = g->has_key_track = g->has_silencing_mode = g->has_silencing_decay = 1;
     g->enabled = !(a && attr(a, e, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0")));
     if (a && attr(a, e, "name", text, sizeof(text))) snprintf(g->name, sizeof(g->name), "%.63s", text);
 }
@@ -279,6 +288,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1;
     memset(m, 0, sizeof(*m));
     group_settings(&m->instrument, NULL, NULL, 1);
+    for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { m->tag_volume[t] = 1; m->tag_enabled[t] = 1; m->tag_polyphony[t] = -1; }
     if (!(file = fopen(path, "rb")) || fseek(file, 0, SEEK_END) || (length = ftell(file)) < 0 ||
         length > MAX_PRESET_BYTES || fseek(file, 0, SEEK_SET)) {
         if (file) fclose(file);
@@ -347,6 +357,19 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             mod->first_binding = m->binding_count;
             modulator = self_closing ? -1 : (int)m->modulator_count;
             m->modulator_count++;
+            continue;
+        }
+        if (!closing && tag_is(tag, "tag")) {                 /* <tags><tag name volume enabled polyphony> */
+            char name[64], text[32];
+            uint64_t bit;
+            float v;
+            if (!attr(a, end, "name", name, sizeof(name)) || !(bit = ds_preset_model_tag_mask(m, name))) continue;
+            for (unsigned t = 0; t < DS_MAX_TAGS; ++t) {
+                if (!(bit & (1ull << t))) continue;
+                if (attr_volume(a, end, &v)) m->tag_volume[t] = v < 0 ? 0 : v;
+                if (attr(a, end, "enabled", text, sizeof(text))) m->tag_enabled[t] = !(!strcasecmp(text, "false") || !strcmp(text, "0"));
+                if (attr_num(a, end, "polyphony", &v)) m->tag_polyphony[t] = v >= 1 ? (int)lrintf(v) : -1;
+            }
             continue;
         }
         if (tag_is(tag, "effects")) { in_effects = !closing && !self_closing; continue; }

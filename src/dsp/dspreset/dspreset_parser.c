@@ -182,11 +182,18 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
         if (!strcmp(mode, "memory")) out->playback_mode = DS_PLAYBACK_MEMORY;
         else if (!strcmp(mode, "disk_streaming")) out->playback_mode = DS_PLAYBACK_DISK_STREAMING;
     }
+    out->pitch_key_track = (float)number(s, depth, "pitchKeyTrack", 1.0);
+    if (!lookup(s, depth, "silencedByTags", out->silenced_by, sizeof(out->silenced_by))) out->silenced_by[0] = '\0';
+    out->silencing_mode = lookup(s, depth, "silencingMode", mode, sizeof(mode)) && !strcasecmp(mode, "normal")
+                          ? DS_SILENCE_NORMAL : DS_SILENCE_FAST;
+    out->silencing_decay = (float)number(s, depth, "silencingDecay", 0);
     {
         const scope_t *own = &s[depth - 1];
         static const struct { const char *name; unsigned bit; } owned[] = {
             {"pan", DS_OWN_PAN}, {"ampVelTrack", DS_OWN_VEL_TRACK}, {"attack", DS_OWN_ATTACK},
-            {"decay", DS_OWN_DECAY}, {"sustain", DS_OWN_SUSTAIN}, {"release", DS_OWN_RELEASE}};
+            {"decay", DS_OWN_DECAY}, {"sustain", DS_OWN_SUSTAIN}, {"release", DS_OWN_RELEASE},
+            {"pitchKeyTrack", DS_OWN_KEY_TRACK}, {"silencingMode", DS_OWN_SILENCING_MODE},
+            {"silencingDecay", DS_OWN_SILENCING_DECAY}};
         char tags[256], text2[64];
         for (unsigned i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i)
             if (ds_xml_attribute(own->attrs, own->end, owned[i].name, text2, sizeof(text2))) out->own_mask |= owned[i].bit;

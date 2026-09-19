@@ -27,6 +27,10 @@ enum {
     DS_TARGET_CONTROL_VALUE,          /* level ui: set another control */
     DS_TARGET_EFFECT,                 /* type effect: an <effects> parameter */
     DS_TARGET_MODULATOR,              /* type modulator: a modulator's own setting */
+    DS_TARGET_KEY_TRACK,              /* PITCH_KEY_TRACK */
+    DS_TARGET_SILENCING_MODE,         /* 0 fast, 1 normal */
+    DS_TARGET_SILENCING_DECAY,
+    DS_TARGET_TAG_POLYPHONY,
 };
 
 /* How a modulator's value lands on its target (DecentSampler's modBehavior;
@@ -89,6 +93,9 @@ typedef struct {
     char name[64];
     float volume, tuning, pan, vel_track, env[4];
     int has_pan, has_vel_track, has_env[4];
+    float key_track, silencing_decay;
+    int silencing_mode;
+    int has_key_track, has_silencing_mode, has_silencing_decay;
     int enabled;
     uint64_t tag_mask;
 } ds_group_settings_t;
@@ -99,6 +106,10 @@ typedef struct {
     unsigned group_count;
     char tag_names[DS_MAX_TAGS][32];
     unsigned tag_count;
+    /* <tags><tag>: each tag's starting volume, on/off and voice limit (-1 = none) */
+    float tag_volume[DS_MAX_TAGS];
+    unsigned char tag_enabled[DS_MAX_TAGS];
+    int tag_polyphony[DS_MAX_TAGS];
     ds_control_t controls[DS_MAX_CONTROLS];
     unsigned control_count;
     ds_choice_t *choices;

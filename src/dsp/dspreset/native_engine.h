@@ -41,6 +41,7 @@ typedef struct {
     uint64_t loop_start, loop_end;      /* loop_end exclusive */
     int streams;                        /* needs frames beyond the resident head */
     uint64_t tag_mask;                  /* in the model's tag numbering */
+    uint64_t silenced_by;               /* silencedByTags, same numbering */
 } ds_zone_t;
 
 enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE };
@@ -75,7 +76,7 @@ typedef struct {
     uint32_t underruns;
     float vel;                          /* velocity 0..1, re-applied as settings move */
     uint32_t note_id;                   /* which note-on started it: its layers share one */
-    int choked;                         /* stolen by the note limit: fading out, not counted */
+    int choked;                         /* silenced (note limit, choke, tag limit): fading out, not counted */
     /* Its group's effects, fresh per note as in DecentSampler. */
     unsigned fx_count;
     unsigned char fx_index[DS_VOICE_FX];
@@ -114,6 +115,7 @@ typedef struct {
     ds_group_settings_t instrument_rt;
     float tag_volume[DS_MAX_TAGS];
     unsigned char tag_enabled[DS_MAX_TAGS];
+    int tag_polyphony[DS_MAX_TAGS];     /* voices a tag may sound at once; -1 = no limit */
     float control_value[DS_MAX_CONTROLS];
     /* Effects: coefficients per model effect, recomputed on the audio thread
      * when a binding moves a setting; state for the instrument-level ones. */

@@ -70,6 +70,10 @@ pressure/timbre modulators, UI visuals (images, animations, skins, oscilloscope,
 colours, labels, text/colour bindings), `playbackMode`. The Move sequences, arpeggiates and draws
 its own pages; it has one stereo output and no MPE input path.
 
+## Progress
+
+- 2026-09-19: items 3 (pitchKeyTrack), 4 (tag polyphony), 10 (choke groups) — built, tested.
+
 ## Decision (Josh, 2026-09-19)
 
 **Go:** every item in Tiers 1 and 2 that needs no recording — items 3–7 and 10–22.
