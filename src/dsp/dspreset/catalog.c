@@ -98,21 +98,20 @@ static int library_base(const char *root, char *base, size_t n) {
     DIR *dir;
     struct dirent *entry;
     int folders = 0;
-    snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", root);
-    if (!stat(path, &st)) { snprintf(base, n, "%s", root); return 0; }
+    /* (a path too long for these buffers is no library info) */
+    if (snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", root) >= (int)sizeof(path)) return -1;
+    if (!stat(path, &st)) return snprintf(base, n, "%s", root) >= (int)n ? -1 : 0;
     if (!(dir = opendir(root))) return -1;
     while ((entry = readdir(dir)) != NULL) {
         char sub[1100];
         if (entry->d_name[0] == '.' || !strcmp(entry->d_name, "__MACOSX")) continue;
-        snprintf(sub, sizeof(sub), "%s/%s", root, entry->d_name);
-        if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { folders++; snprintf(only, sizeof(only), "%s", sub); }
+        if (snprintf(sub, sizeof(sub), "%s/%s", root, entry->d_name) >= (int)sizeof(sub)) continue;
+        if (!stat(sub, &st) && S_ISDIR(st.st_mode) && snprintf(only, sizeof(only), "%s", sub) < (int)sizeof(only)) folders++;
     }
     closedir(dir);
     if (folders != 1) return -1;
-    snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", only);
-    if (stat(path, &st)) return -1;
-    snprintf(base, n, "%s", only);
-    return 0;
+    if (snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", only) >= (int)sizeof(path) || stat(path, &st)) return -1;
+    return snprintf(base, n, "%s", only) >= (int)n ? -1 : 0;
 }
 
 typedef struct { int found, top; char label[128]; } menu_entry_t;
@@ -130,8 +129,7 @@ static void apply_library_info(ds_bank_t *bank, const char *root, found_list_t *
     unsigned char *used;
     unsigned n = 0, count = 0;
     if (library_base(root, base, sizeof(base))) return;
-    snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", base);
-    if (!(xml = read_text(path))) return;
+    if (snprintf(path, sizeof(path), "%s/DSLibraryInfo.xml", base) >= (int)sizeof(path) || !(xml = read_text(path))) return;
     entries = malloc(MAX_PRESETS * sizeof(*entries));
     order = malloc(2 * MAX_PRESETS * sizeof(*order));             /* top-level keys, then the result */
     used = calloc(list->count ? list->count : 1, 1);
@@ -162,7 +160,7 @@ static void apply_library_info(ds_bank_t *bank, const char *root, found_list_t *
             int hit = -1;
             for (char *c = text; *c; ++c) if (*c == '\\') *c = '/';
             while (q[0] == '.' && q[1] == '/') q += 2;
-            snprintf(full, sizeof(full), "%s/%s", base, q);
+            if (snprintf(full, sizeof(full), "%s/%s", base, q) >= (int)sizeof(full)) continue;
             for (unsigned i = 0; i < list->count && hit < 0; ++i) if (!strcmp(list->items[i].path, full)) hit = (int)i;
             for (unsigned i = 0; i < list->count && hit < 0; ++i) if (!strcasecmp(list->items[i].path, full)) hit = (int)i;
             if (hit < 0) continue;                                /* a missing file is skipped */

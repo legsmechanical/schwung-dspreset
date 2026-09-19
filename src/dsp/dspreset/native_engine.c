@@ -1390,8 +1390,8 @@ static void fill(ds_native_engine_t *e, ds_voice_t *v, const ds_wav_source_t *fi
                      ds_wav_source_read_frames(file, first - len, e->xf_scratch, n, error, sizeof(error)) == (int)n)
                 far = e->xf_scratch;
             for (unsigned k = 0; far && k < n; ++k) {
-                float g_out, g_in, *out = dst + (size_t)(first - f + k) * ch;
-                xf_gains(b, first + k, &g_out, &g_in);
+                float g_out = 1.0f, g_in = 0.0f, *out = dst + (size_t)(first - f + k) * ch;
+                xf_gains(b, first + k, &g_out, &g_in);            /* always inside the fade here */
                 for (unsigned c = 0; c < ch; ++c) out[c] = out[c] * g_out + far[(size_t)k * ch + c] * g_in;
             }
         }

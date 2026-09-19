@@ -62,7 +62,7 @@ static void settle(plugin_t *p) {
 
 int main(void) {
     const char *dir = getenv("TEST_TMP");
-    char path[1024];
+    char path[2048];
     static ds_native_engine_t e;
     float out[256];
     CHECK(dir);
