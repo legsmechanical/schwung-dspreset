@@ -93,6 +93,30 @@ static double number(const scope_t *s, int depth, const char *name, double fallb
     return lookup(s, depth, name, text, sizeof(text)) && parse_double(text, &v) ? v : fallback;
 }
 
+int ds_note_number(const char *text) {
+    static const int pitch[7] = {9, 11, 0, 2, 4, 5, 7};          /* A B C D E F G */
+    char *tail;
+    double v;
+    int pc, octave;
+    while (isspace((unsigned char)*text)) ++text;
+    v = strtod(text, &tail);
+    if (tail != text) return (int)v;
+    if (toupper((unsigned char)*text) < 'A' || toupper((unsigned char)*text) > 'G') return DS_NO_NOTE;
+    pc = pitch[toupper((unsigned char)*text) - 'A'];
+    ++text;
+    if (*text == '#') { pc++; ++text; } else if (*text == 'b') { pc--; ++text; }
+    octave = (int)strtol(text, &tail, 10);
+    if (tail == text) return DS_NO_NOTE;
+    return (octave + 2) * 12 + pc;                                  /* C3 = 60 */
+}
+
+/* A note attribute: a number or a note name. */
+static int note_attr(const scope_t *s, int depth, const char *name, int fallback) {
+    char text[32];
+    int n;
+    return lookup(s, depth, name, text, sizeof(text)) && (n = ds_note_number(text)) != DS_NO_NOTE ? n : fallback;
+}
+
 static int boolean(const scope_t *s, int depth, const char *name, int fallback) {
     char text[16];
     if (!lookup(s, depth, name, text, sizeof(text))) return fallback;
@@ -145,9 +169,9 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
     if (!lookup(s, depth, "path", text, sizeof(text)) || !text[0]) return -1;
     for (char *c = text; *c; ++c) if (*c == '\\') *c = '/';
     snprintf(out->path, sizeof(out->path), "%s", text);
-    out->root_note = (int)number(s, depth, "rootNote", 60);
-    out->lo_note = (int)number(s, depth, "loNote", 0);
-    out->hi_note = (int)number(s, depth, "hiNote", 127);
+    out->root_note = note_attr(s, depth, "rootNote", 60);
+    out->lo_note = note_attr(s, depth, "loNote", 0);
+    out->hi_note = note_attr(s, depth, "hiNote", 127);
     out->lo_vel = (int)number(s, depth, "loVel", 0);
     out->hi_vel = (int)number(s, depth, "hiVel", 127);
     out->seq_position = (int)number(s, depth, "seqPosition", 1);
@@ -157,7 +181,41 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
         else if (!strcmp(mode, "random") || !strcmp(mode, "true_random")) out->seq_mode = DS_SEQ_RANDOM;
     }
     out->trigger = DS_TRIGGER_ATTACK;
-    if (lookup(s, depth, "trigger", mode, sizeof(mode)) && !strcmp(mode, "release")) out->trigger = DS_TRIGGER_RELEASE;
+    if (lookup(s, depth, "trigger", mode, sizeof(mode))) {
+        if (!strcasecmp(mode, "release")) out->trigger = DS_TRIGGER_RELEASE;
+        else if (!strcasecmp(mode, "first")) out->trigger = DS_TRIGGER_FIRST;
+        else if (!strcasecmp(mode, "legato")) out->trigger = DS_TRIGGER_LEGATO;
+        else if (!strcasecmp(mode, "continuous")) out->trigger = DS_TRIGGER_CONTINUOUS;
+    }
+    {   /* previousNotes (the true-legato guide writes previousNote, with names) */
+        char list[256];
+        out->previous_count = 0;
+        if (lookup(s, depth, "previousNotes", list, sizeof(list)) || lookup(s, depth, "previousNote", list, sizeof(list))) {
+            char *q = list;
+            while (*q && out->previous_count < DS_MAX_PREVIOUS) {
+                char *comma = strchr(q, ',');
+                int n;
+                if (comma) *comma = '\0';
+                if ((n = ds_note_number(q)) >= 0 && n <= 127) out->previous_notes[out->previous_count++] = n;
+                if (!comma) break;
+                q = comma + 1;
+            }
+        }
+    }
+    out->legato_interval = lookup(s, depth, "legatoInterval", text, sizeof(text)) ? (int)strtol(text, NULL, 10) : DS_NO_INTERVAL;
+    out->glide_time = (float)number(s, depth, "glideTime", 0);
+    out->glide_mode = DS_GLIDE_LEGATO;
+    if (lookup(s, depth, "glideMode", mode, sizeof(mode)))
+        out->glide_mode = !strcasecmp(mode, "always") ? DS_GLIDE_ALWAYS : !strcasecmp(mode, "off") ? DS_GLIDE_OFF : DS_GLIDE_LEGATO;
+    out->release_decay = 0;
+    out->release_decay_db = 0;
+    if (lookup(s, depth, "releaseTriggerDecay", text, sizeof(text))) {
+        char *tail;
+        double v = strtod(text, &tail);
+        while (isspace((unsigned char)*tail)) ++tail;
+        out->release_decay_db = !strncasecmp(tail, "db", 2);
+        out->release_decay = (float)fabs(v);                /* a positive dB value means a decay too */
+    }
     out->group_index = group_index;
     out->tuning = number(s, depth, "tuning", 0);
     for (int i = 0; i < depth; ++i) out->tuning += own_number(&s[i], "groupTuning", 0);
@@ -196,7 +254,7 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
             {"pan", DS_OWN_PAN}, {"ampVelTrack", DS_OWN_VEL_TRACK}, {"attack", DS_OWN_ATTACK},
             {"decay", DS_OWN_DECAY}, {"sustain", DS_OWN_SUSTAIN}, {"release", DS_OWN_RELEASE},
             {"pitchKeyTrack", DS_OWN_KEY_TRACK}, {"silencingMode", DS_OWN_SILENCING_MODE},
-            {"silencingDecay", DS_OWN_SILENCING_DECAY}};
+            {"silencingDecay", DS_OWN_SILENCING_DECAY}, {"glideTime", DS_OWN_GLIDE_TIME}, {"glideMode", DS_OWN_GLIDE_MODE}};
         char tags[256], text2[64];
         for (unsigned i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i)
             if (ds_xml_attribute(own->attrs, own->end, owned[i].name, text2, sizeof(text2))) out->own_mask |= owned[i].bit;

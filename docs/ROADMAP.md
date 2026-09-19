@@ -80,6 +80,8 @@ its own pages; it has one stereo output and no MPE input path.
 - 2026-09-19: item 15 (`<midi><velocity>`), item 16's LFO SHAPE / MOD_DELAY_TIME / TRIGGER, an
   envelope's delay, and the `<random>` modulator (found in the guide during this work; not in the
   first survey) — built, tested.
+- 2026-09-19: items 11 (keyswitches), 12 (first / legato / continuous, previousNotes,
+  legatoInterval, note names), 13 (glide), 14 (releaseTriggerDecay) — built, tested.
 
 ## Decision (Josh, 2026-09-19)
 

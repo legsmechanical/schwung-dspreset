@@ -35,6 +35,8 @@ enum {
     DS_TARGET_SAMPLE_START, DS_TARGET_SAMPLE_END, DS_TARGET_LOOP_START, DS_TARGET_LOOP_END,
     DS_TARGET_ROOT_NOTE, DS_TARGET_LO_NOTE, DS_TARGET_HI_NOTE, DS_TARGET_LO_VEL, DS_TARGET_HI_VEL,
     DS_TARGET_AMP_ENV_ENABLED,
+    DS_TARGET_GLIDE_TIME, DS_TARGET_GLIDE_MODE,
+    DS_TARGET_MIDI_ENABLED,           /* type note, level midi: a <midi><note> listener on/off */
 };
 
 /* How a modulator's value lands on its target (DecentSampler's modBehavior;
@@ -95,6 +97,16 @@ typedef struct {
 
 typedef struct { int cc; unsigned first_binding, binding_count; } ds_cc_map_t;
 
+/* <midi><note>: keyswitches. Its bindings fire before the note plays;
+ * `swallow` keeps the key from playing at all. */
+enum { DS_NOTE_EVENT_ON = 0, DS_NOTE_EVENT_OFF, DS_NOTE_EVENT_ANY };
+typedef struct {
+    int lo, hi, event, enabled, swallow;
+    int midi_index;                   /* its place among <midi>'s children (midiElementIndex) */
+    unsigned first_binding, binding_count;
+} ds_note_map_t;
+#define DS_MAX_NOTE_MAPS 128
+
 typedef struct {
     char type[24];
     uint64_t tag_mask;
@@ -114,6 +126,8 @@ typedef struct {
     float key_track, silencing_decay;
     int silencing_mode;
     int has_key_track, has_silencing_mode, has_silencing_decay;
+    float glide_time;
+    int glide_mode, has_glide_time, has_glide_mode;
     /* Set only by bindings; `live` says which (DS_OWN_* bits of dspreset_parser.h). */
     unsigned live;
     int64_t frames[4];                /* start, end, loopStart, loopEnd as written (inclusive ends) */
@@ -141,6 +155,8 @@ typedef struct {
     unsigned binding_count;
     ds_cc_map_t *ccs;
     unsigned cc_count;
+    ds_note_map_t notes[DS_MAX_NOTE_MAPS];
+    unsigned note_count;
     ds_effect_t *effects;
     unsigned effect_count;
     ds_modulator_t modulators[DS_MAX_MODULATORS];

@@ -227,12 +227,25 @@ load's control pass and the plugin's restore loop) are honoured.
 triangle), TRIGGER / `trigger="attack"` (a GLOBAL LFO or random restarts at each note-on), and
 `<midi><velocity>` (a voice-scope velocity modulator; each binding's own `modAmount` scales it).
 
+## What a note knows about the notes before it
+
+`e->ctx_prev` (the previously TRIGGERED note, kept after release) and `e->ctx_keys_before`
+(keys down before this one) are set in note-on and read by `zone_matches`: `trigger` first
+(no key down) / legato (one down) / continuous (always), `previousNotes` (or the true-legato
+guide's `previousNote`, with names: C3 = 60, JUCE's convention — ⚠ unconfirmed against a
+real preset), `legatoInterval` (note − previous). Glide (`glideTime`/`glideMode`, default
+legato = only with a key down): constant time, geometric in pitch — one `pow` per block, one
+multiply per frame, in DOUBLE (float lost 5e-9 of pitch). `releaseTriggerDecay`: "NdB" = dB per
+second held; a plain number = linear gain LOST per second (`1 − x·held`; the documented default
+0.0 meaning "no decay" rules out `x^held`). `<midi><note>` keyswitches fire BEFORE the note
+plays; `swallowNotes` also swallows its note-off; `eventType` defaults to note_on (⚠ the guide
+says both note_on and any); `midiElementIndex` counts `<cc>`, `<note>`, `<velocity>` in order.
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
 delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
-Also: envelope curve shapes, FLAC samples, legato/first triggers,
-musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
+Also: envelope curve shapes, FLAC samples, musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 
 ## Build, test, deploy

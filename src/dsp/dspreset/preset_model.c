@@ -103,6 +103,7 @@ float ds_binding_translate(const ds_binding_t *b, float in_min, float in_max, fl
 
 static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(type, "effect")) return DS_TARGET_EFFECT;
+    if (!strcmp(type, "note") && !strcmp(param, "ENABLED")) return DS_TARGET_MIDI_ENABLED;
     if (!strcmp(type, "modulator")) return DS_TARGET_MODULATOR;
     if ((!strcmp(param, "VALUE") || !strcmp(param, "X_VALUE") || !strcmp(param, "Y_VALUE")) &&
         (!strcmp(level, "ui") || !strcmp(type, "control"))) return DS_TARGET_CONTROL_VALUE;
@@ -136,6 +137,9 @@ static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(param, "HI_VEL")) return DS_TARGET_HI_VEL;
     if (!strcmp(param, "AMP_ENV_ENABLED")) return DS_TARGET_AMP_ENV_ENABLED;
     if (!strcmp(param, "GROUP_VOLUME")) return DS_TARGET_VOLUME;
+    if (!strcmp(param, "GLIDE_TIME")) return DS_TARGET_GLIDE_TIME;
+    if (!strcmp(param, "GLIDE_MODE")) return DS_TARGET_GLIDE_MODE;
+    if (!strcmp(type, "note") && !strcmp(param, "ENABLED")) return DS_TARGET_MIDI_ENABLED;
     return DS_TARGET_NONE;
 }
 
@@ -208,6 +212,7 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
         else if (!strcmp(text, "modulate")) b->mod_behavior = DS_MODB_MODULATE;
     }
     if (b->target == DS_TARGET_MODULATOR && attr_num(a, e, "modulatorIndex", &f)) b->position = (int)f;
+    if (b->target == DS_TARGET_MIDI_ENABLED && attr_num(a, e, "midiElementIndex", &f)) b->position = (int)f;
     if (attr(a, e, "translationValue", text, sizeof(text))) {
         char *tail;
         /* words a fixed value may be: SILENCING_MODE, an LFO's SHAPE (DS_LFO_*), TRIGGER */
@@ -217,6 +222,9 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
         else if (!strcasecmp(text, "square")) b->fixed = DS_LFO_SQUARE;
         else if (!strcasecmp(text, "saw")) b->fixed = DS_LFO_SAW;
         else if (!strcasecmp(text, "triangle")) b->fixed = DS_LFO_TRIANGLE;
+        else if (!strcasecmp(text, "off")) b->fixed = DS_GLIDE_OFF;              /* GLIDE_MODE */
+        else if (!strcasecmp(text, "always")) b->fixed = DS_GLIDE_ALWAYS;
+        else if (!strcasecmp(text, "legato")) b->fixed = DS_GLIDE_LEGATO;
         else {
             b->fixed = strtof(text, &tail);
             while (isspace((unsigned char)*tail)) ++tail;
@@ -252,7 +260,12 @@ static void group_settings(ds_group_settings_t *g, const char *a, const char *e,
     g->has_silencing_mode = a && attr(a, e, "silencingMode", text, sizeof(text));
     g->silencing_mode = g->has_silencing_mode && !strcasecmp(text, "normal") ? DS_SILENCE_NORMAL : DS_SILENCE_FAST;
     g->has_silencing_decay = a && attr_num(a, e, "silencingDecay", &g->silencing_decay);
-    if (instrument) g->has_pan = g->has_vel_track = g->has_key_track = g->has_silencing_mode = g->has_silencing_decay = 1;
+    g->has_glide_time = a && attr_num(a, e, "glideTime", &g->glide_time);
+    g->has_glide_mode = a && attr(a, e, "glideMode", text, sizeof(text));
+    g->glide_mode = !g->has_glide_mode ? DS_GLIDE_LEGATO : !strcasecmp(text, "always") ? DS_GLIDE_ALWAYS :
+                    !strcasecmp(text, "off") ? DS_GLIDE_OFF : DS_GLIDE_LEGATO;
+    if (instrument) g->has_pan = g->has_vel_track = g->has_key_track = g->has_silencing_mode = g->has_silencing_decay =
+                    g->has_glide_time = g->has_glide_mode = 1;
     g->enabled = !(a && attr(a, e, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0")));
     if (a && attr(a, e, "name", text, sizeof(text))) snprintf(g->name, sizeof(g->name), "%.63s", text);
 }
@@ -321,6 +334,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     char *xml, *p, *w;
     int in_ui = 0, in_midi = 0, in_mod = 0, in_effects = 0, in_group = 0;
     int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1, pad = -1, ui_count = 0, in_velocity = 0;
+    int note_map = -1, midi_index = 0;
     memset(m, 0, sizeof(*m));
     group_settings(&m->instrument, NULL, NULL, 1);
     for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { m->tag_volume[t] = 1; m->tag_enabled[t] = 1; m->tag_polyphony[t] = -1; }
@@ -366,6 +380,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             /* <midi><velocity>: its bindings follow each note's velocity, as a
              * per-note <midiVelocity> modulator's would */
             if (closing) { modulator = -1; in_velocity = 0; continue; }
+            midi_index++;
             if (m->modulator_count == DS_MAX_MODULATORS || self_closing) continue;
             memset(&m->modulators[m->modulator_count], 0, sizeof(ds_modulator_t));
             m->modulators[m->modulator_count].kind = DS_MOD_VELOCITY;
@@ -550,9 +565,33 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 continue;
             }
         }
+        if (in_midi && tag_is(tag, "note")) {
+            char text[64];
+            if (closing) { note_map = -1; continue; }
+            midi_index++;
+            if (m->note_count < DS_MAX_NOTE_MAPS && attr(a, end, "note", text, sizeof(text))) {
+                ds_note_map_t *n = &m->notes[m->note_count];
+                char *dash = strchr(text + 1, '-');         /* "24-35" ("-1" alone is not a range) */
+                memset(n, 0, sizeof(*n));
+                if (dash) { *dash = '\0'; n->hi = ds_note_number(dash + 1); }
+                n->lo = ds_note_number(text);
+                if (!dash) n->hi = n->lo;
+                if (n->lo == DS_NO_NOTE || n->hi == DS_NO_NOTE) continue;
+                n->event = !attr(a, end, "eventType", text, sizeof(text)) ? DS_NOTE_EVENT_ON :
+                           !strcasecmp(text, "note_off") ? DS_NOTE_EVENT_OFF : !strcasecmp(text, "any") ? DS_NOTE_EVENT_ANY : DS_NOTE_EVENT_ON;
+                n->enabled = !(attr(a, end, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0")));
+                n->swallow = attr(a, end, "swallowNotes", text, sizeof(text)) && !strcasecmp(text, "true");
+                n->midi_index = midi_index - 1;
+                n->first_binding = m->binding_count;
+                note_map = self_closing ? -1 : (int)m->note_count;
+                m->note_count++;
+            }
+            continue;
+        }
         if (in_midi && tag_is(tag, "cc")) {
             float v;
             if (closing) { cc = -1; continue; }
+            midi_index++;
             if (m->cc_count < MAX_CCS && attr_num(a, end, "number", &v)) {
                 m->ccs[m->cc_count].cc = (int)v;
                 m->ccs[m->cc_count].first_binding = m->binding_count;
@@ -570,6 +609,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             if (in_ui && ctrl >= 0 && choice >= 0) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->choices[choice].binding_count++; }
             else if (in_ui && ctrl >= 0 && m->controls[ctrl].kind == DS_CONTROL_KNOB) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->controls[ctrl].binding_count++; }
             else if (in_midi && cc >= 0) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->ccs[cc].binding_count++; }
+            else if (in_midi && note_map >= 0) { parse_binding(m, a, end, &m->bindings[m->binding_count++]); m->notes[note_map].binding_count++; }
         }
     }
     free(xml);

@@ -82,6 +82,9 @@ typedef struct {
      * overwrite them mid-read, and that fill is discarded anyway). */
     ds_bounds_t b;
     int amp_env;                        /* the zone's amp envelope is on (AMP_ENV_ENABLED may move it) */
+    uint32_t glide_left;                /* frames of portamento still to go */
+    double glide_step;                  /* semitones per frame, toward the note */
+    float rt_gain;                      /* a release trigger's releaseTriggerDecay, else 1 */
     double pos, inc;                    /* virtual frame; frames per output frame */
     float gain_l, gain_r;
     int env_stage;
@@ -115,6 +118,13 @@ typedef struct {
     uint32_t rr_counter[128];
     int note_velocity[128];
     int sustain_pedal;
+    /* The note being started, as the zones see it: the previously triggered
+     * note (-1 = none yet) and how many keys were already down. */
+    int last_note, ctx_prev, ctx_keys_before;
+    uint64_t frame_clock;               /* frames rendered, for how long a key was held */
+    uint64_t note_on_frame[128];
+    unsigned char swallowed[128];       /* a keyswitch kept this key from playing */
+    unsigned char note_map_enabled[DS_MAX_NOTE_MAPS];
     double bend_ratio;
     _Atomic uint32_t underruns;         /* summed from voices, for status */
     /* Worker only. Files are closed once their head is read, so a library of

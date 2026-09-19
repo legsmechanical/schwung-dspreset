@@ -280,6 +280,8 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     }
     /* Controls start at the preset's values, and fire (DecentSampler's
      * triggerOnLoad default) so the sound matches what the preset shows. */
+    e->last_note = -1;
+    for (unsigned n = 0; n < e->model.note_count; ++n) e->note_map_enabled[n] = (unsigned char)e->model.notes[n].enabled;
     e->initialising = 1;
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     e->initialising = 0;
@@ -345,7 +347,7 @@ static float coef_for(float seconds, unsigned rate) {
  * A zone's volume, pitch, pan and envelope come from its own attributes where
  * it sets them, else its group's LIVE settings, else the instrument's — so a
  * control bound to a group or the instrument moves everything that inherits. */
-typedef struct { float gain, pan, vel_track, env[4], key_track, silencing_decay; int silencing_mode, root; double tuning; } zone_now_t;
+typedef struct { float gain, pan, vel_track, env[4], key_track, silencing_decay, glide_time; int silencing_mode, root, glide_mode; double tuning; } zone_now_t;
 
 /* Frame positions, key/velocity ranges, root and amp-envelope switch: a
  * binding on the group wins, then one on the instrument, then the sample's
@@ -387,6 +389,8 @@ static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const
     for (int i = 0; i < 4; ++i)
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
     out->root = pick_key(z, g, in, 0, DS_OWN_ROOT, d->root_note);
+    out->glide_time = (d->own_mask & DS_OWN_GLIDE_TIME) ? d->glide_time : g->has_glide_time ? g->glide_time : in->glide_time;
+    out->glide_mode = (d->own_mask & DS_OWN_GLIDE_MODE) ? d->glide_mode : g->has_glide_mode ? g->glide_mode : in->glide_mode;
     out->key_track = (d->own_mask & DS_OWN_KEY_TRACK) ? d->pitch_key_track : g->has_key_track ? g->key_track : in->key_track;
     out->silencing_mode = (d->own_mask & DS_OWN_SILENCING_MODE) ? d->silencing_mode :
                           g->has_silencing_mode ? g->silencing_mode : in->silencing_mode;
@@ -430,6 +434,8 @@ static void set_group_value(ds_group_settings_t *g, int target, float v) {
         break;
     }
     case DS_TARGET_AMP_ENV_ENABLED: g->amp_env = v >= 0.5f; g->live |= DS_OWN_AMP_ENV; break;
+    case DS_TARGET_GLIDE_TIME: g->glide_time = v < 0 ? 0 : v; g->has_glide_time = 1; break;
+    case DS_TARGET_GLIDE_MODE: { long k = lrintf(v); g->glide_mode = k < DS_GLIDE_OFF || k > DS_GLIDE_LEGATO ? DS_GLIDE_LEGATO : (int)k; g->has_glide_mode = 1; break; }
     default: break;
     }
 }
@@ -502,6 +508,10 @@ static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in
         } else if (b->position >= 0 && b->position < (int)e->model.control_count) {
             drive_control(e, b, (unsigned)b->position, in_min, in_max, value, v, depth);
         }
+        return;
+    case DS_TARGET_MIDI_ENABLED:
+        for (unsigned n = 0; n < e->model.note_count; ++n)
+            if (e->model.notes[n].midi_index == b->position) e->note_map_enabled[n] = v >= 0.5f;
         return;
     case DS_TARGET_MODULATOR:
         if (b->tag_mask) {
@@ -804,6 +814,21 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
         if (e->model.modulators[k].voice_scope) mod_start(&e->model.modulators[k], &v->mods[k], &e->mod_rng[k]);
     v->note = note; v->velocity = velocity;
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
+    /* portamento from the previous note: a glide in pitch, constant in time */
+    v->glide_left = 0;
+    if (!one_shot && now.glide_time > 0 && e->ctx_prev >= 0 && e->ctx_prev != note &&
+        (now.glide_mode == DS_GLIDE_ALWAYS || (now.glide_mode == DS_GLIDE_LEGATO && e->ctx_keys_before > 0))) {
+        double frames = floor(now.glide_time * e->output_rate + 0.5);
+        v->glide_left = frames < 1 ? 1 : (uint32_t)frames;
+        v->glide_step = -((double)(e->ctx_prev - note) * now.key_track) / (double)v->glide_left;
+    }
+    /* a release trigger quieter the longer its key was held */
+    v->rt_gain = 1.0f;
+    if (one_shot && d->release_decay > 0) {
+        float held = (float)(e->frame_clock - e->note_on_frame[note]) / (float)e->output_rate;
+        v->rt_gain = d->release_decay_db ? powf(10.0f, -d->release_decay * held / 20.0f) : 1.0f - d->release_decay * held;
+        if (v->rt_gain < 0) v->rt_gain = 0;
+    }
     v->age = ++e->age_counter;
     v->underruns = 0;
     if (!v->amp_env) {
@@ -850,7 +875,17 @@ static void release_voice(ds_native_engine_t *e, ds_voice_t *v) {
 static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int trigger) {
     const ds_group_settings_t *g = &e->groups_rt[z->def.group_index], *in = &e->instrument_rt;
     const ds_dspreset_sample_t *d = &z->def;
-    return z->source >= 0 && d->trigger == trigger && zone_enabled(e, z) &&
+    if (trigger == DS_TRIGGER_RELEASE ? d->trigger != DS_TRIGGER_RELEASE : d->trigger == DS_TRIGGER_RELEASE) return 0;
+    /* first: only with no other key down; legato: only with one (continuous: always) */
+    if (d->trigger == DS_TRIGGER_FIRST && e->ctx_keys_before) return 0;
+    if (d->trigger == DS_TRIGGER_LEGATO && !e->ctx_keys_before) return 0;
+    if (d->previous_count) {
+        int k = 0;
+        while (k < d->previous_count && d->previous_notes[k] != e->ctx_prev) ++k;
+        if (e->ctx_prev < 0 || k == d->previous_count) return 0;
+    }
+    if (d->legato_interval != DS_NO_INTERVAL && (e->ctx_prev < 0 || note - e->ctx_prev != d->legato_interval)) return 0;
+    return z->source >= 0 && zone_enabled(e, z) &&
            note >= pick_key(z, g, in, 1, DS_OWN_LO_NOTE, d->lo_note) && note <= pick_key(z, g, in, 2, DS_OWN_HI_NOTE, d->hi_note) &&
            velocity >= pick_key(z, g, in, 3, DS_OWN_LO_VEL, d->lo_vel) && velocity <= pick_key(z, g, in, 4, DS_OWN_HI_VEL, d->hi_vel);
 }
@@ -961,9 +996,29 @@ static void trigger_zones(ds_native_engine_t *e, int note, int velocity, int tri
     }
 }
 
+/* <midi><note> listeners for `note`: fire the bindings of those listening to
+ * this event; 1 if any of them swallows the key. */
+static int note_listeners(ds_native_engine_t *e, int note, int velocity, int on) {
+    int swallow = 0;
+    for (unsigned n = 0; n < e->model.note_count; ++n) {
+        const ds_note_map_t *map = &e->model.notes[n];
+        if (!e->note_map_enabled[n] || note < map->lo || note > map->hi) continue;
+        swallow |= map->swallow;
+        if (map->event != DS_NOTE_EVENT_ANY && map->event != (on ? DS_NOTE_EVENT_ON : DS_NOTE_EVENT_OFF)) continue;
+        for (unsigned i = 0; i < map->binding_count; ++i)
+            apply_binding(e, &e->model.bindings[map->first_binding + i], 0, 127, (float)velocity, 0);
+    }
+    return swallow;
+}
+
 void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
     if (!e || note < 0 || note > 127 || velocity < 0 || velocity > 127) return;
     if (!velocity) { ds_native_engine_note_off(e, note); return; }
+    /* keyswitches act before the note plays; a swallowing one keeps it silent */
+    if (e->model.note_count && note_listeners(e, note, velocity, 1)) { e->swallowed[note] = 1; return; }
+    e->ctx_prev = e->last_note;
+    e->ctx_keys_before = (int)e->keys_held - (e->note_velocity[note] ? 1 : 0);
+    e->note_on_frame[note] = e->frame_clock;
     if (!e->note_velocity[note] && e->keys_held++ == 0)     /* a global envelope starts with the first key */
         for (unsigned k = 0; k < e->model.modulator_count; ++k)
             if (!e->model.modulators[k].voice_scope && e->model.modulators[k].kind == DS_MOD_ENVELOPE)
@@ -978,10 +1033,13 @@ void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
     enforce_note_limit(e);
     e->note_counter++;
     trigger_zones(e, note, velocity, DS_TRIGGER_ATTACK);
+    e->last_note = note;
 }
 
 void ds_native_engine_note_off(ds_native_engine_t *e, int note) {
     if (!e || note < 0 || note > 127) return;
+    if (e->model.note_count) note_listeners(e, note, 0, 0);
+    if (e->swallowed[note]) { e->swallowed[note] = 0; return; }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];
         if (!v->active || !v->key_down || v->note != note) continue;
@@ -1054,11 +1112,11 @@ static inline int fetch(const ds_voice_t *v, uint64_t vf, uint32_t produced, flo
 
 static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsigned frames, const zone_now_t *settings) {
     uint32_t produced = packed_produced(atomic_load_explicit(&v->stream, memory_order_acquire));
-    double inc;
+    double inc, glide_ratio = 1.0;
     {   /* volume, pan and pitch follow the controls (and modulators) while the note sounds */
         zone_now_t now = *settings;
         float gain;
-        gain = now.gain * (1.0f - now.vel_track + now.vel_track * v->vel);
+        gain = now.gain * (1.0f - now.vel_track + now.vel_track * v->vel) * v->rt_gain;
         v->gain_l = gain * (now.pan > 0 ? 1.0f - now.pan : 1.0f);
         v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
         v->inc = ((double)v->src->file.sample_rate / e->output_rate) *
@@ -1077,6 +1135,10 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         }
     }
     inc = v->inc * e->bend_ratio;
+    if (v->glide_left) {                        /* where the glide is now, then one ratio per frame */
+        glide_ratio = pow(2.0, v->glide_step / 12.0);
+        inc *= pow(2.0, -v->glide_step * v->glide_left / 12.0);
+    }
     for (unsigned i = 0; i < frames; ++i) {
         uint64_t v0 = (uint64_t)v->pos;
         float frac = (float)(v->pos - (double)v0), l0, r0, l1, r1, level;
@@ -1109,6 +1171,8 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         out[2 * i] += (l0 + (l1 - l0) * frac) * v->gain_l * level;
         out[2 * i + 1] += (r0 + (r1 - r0) * frac) * v->gain_r * level;
         v->pos += inc;
+        if (v->glide_left && --v->glide_left) inc *= glide_ratio;
+        else if (glide_ratio != 1.0) { inc = v->inc * e->bend_ratio; glide_ratio = 1.0; }
     }
     if (v->b.streams) atomic_store_explicit(&v->consumed, (uint32_t)v->pos, memory_order_release);
     if (!v->active) atomic_store_explicit(&v->stream, pack(v->generation, 0, 0), memory_order_release);
@@ -1193,6 +1257,7 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
             ds_fx_process(c, &e->fx_state[x], out_lr, frames);
         }
     }
+    e->frame_clock += frames;
     if (underruns) atomic_fetch_add_explicit(&e->underruns, underruns, memory_order_relaxed);
     for (int i = 0; i < DS_MAX_VOICES; ++i) e->voices[i].underruns = 0;
 }

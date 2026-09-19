@@ -6,7 +6,10 @@
 #include "playback_policy.h"
 
 enum { DS_SEQ_ALWAYS = 0, DS_SEQ_ROUND_ROBIN, DS_SEQ_RANDOM };
-enum { DS_TRIGGER_ATTACK = 0, DS_TRIGGER_RELEASE };
+enum { DS_TRIGGER_ATTACK = 0, DS_TRIGGER_RELEASE, DS_TRIGGER_FIRST, DS_TRIGGER_LEGATO, DS_TRIGGER_CONTINUOUS };
+enum { DS_GLIDE_OFF = 0, DS_GLIDE_ALWAYS, DS_GLIDE_LEGATO };
+#define DS_MAX_PREVIOUS 16
+#define DS_NO_INTERVAL (-1000)
 
 /* One playable zone with every inheritable attribute already resolved
  * (<groups> -> <group> -> <sample>), so nothing downstream consults XML. */
@@ -33,6 +36,12 @@ typedef struct {
     char silenced_by[256];          /* silencedByTags: a sample carrying one of these stops this one */
     int silencing_mode;             /* DS_SILENCE_FAST / DS_SILENCE_NORMAL */
     float silencing_decay;          /* seconds; > 0 overrides the mode */
+    int previous_notes[DS_MAX_PREVIOUS], previous_count;   /* previousNotes: only after one of these */
+    int legato_interval;            /* only when the note is this far from the previous one; DS_NO_INTERVAL = any */
+    float glide_time;               /* seconds */
+    int glide_mode;                 /* DS_GLIDE_* */
+    float release_decay;            /* releaseTriggerDecay: dB per second held, or (linear) gain lost per second */
+    int release_decay_db;
 
     /* For live controls: what the <sample> element sets ITSELF, so a group- or
      * instrument-level binding can override everything else without touching
@@ -54,7 +63,12 @@ enum {
     DS_OWN_START = 1u << 9, DS_OWN_END = 1u << 10, DS_OWN_LOOP_START = 1u << 11, DS_OWN_LOOP_END = 1u << 12,
     DS_OWN_ROOT = 1u << 13, DS_OWN_LO_NOTE = 1u << 14, DS_OWN_HI_NOTE = 1u << 15,
     DS_OWN_LO_VEL = 1u << 16, DS_OWN_HI_VEL = 1u << 17, DS_OWN_AMP_ENV = 1u << 18,
+    DS_OWN_GLIDE_TIME = 1u << 19, DS_OWN_GLIDE_MODE = 1u << 20,
 };
+
+/* "60", or a note name ("C3" is 60, as JUCE names them; "F#2", "Db-1"): DS_NO_NOTE if neither. */
+#define DS_NO_NOTE (-1000)
+int ds_note_number(const char *text);
 
 enum { DS_SILENCE_FAST = 0, DS_SILENCE_NORMAL };
 
