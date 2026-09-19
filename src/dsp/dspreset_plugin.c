@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -29,7 +30,11 @@ typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(co
  * list — or a host walking every index to learn the names — never loads the
  * presets it passes. */
 #define SETTLE_MS 150
-#define RESCAN_MS 5000
+/* The instruments folder is re-read only when it has changed, and only
+ * checked when someone looks at the bank list — at most this often. A
+ * periodic full walk (every file, every 5 s) stalled the Move's audio on
+ * the SD card once several large libraries were installed. */
+#define CHANGE_CHECK_MS 1000
 /* A new instance waits this long for a restored state before choosing a first
  * preset itself, so a project reopening never loads something it then drops. */
 #define FIRST_PICK_MS 500
@@ -101,6 +106,8 @@ typedef struct {
     seqstr_t request;                   /* preset_path / state from the host */
     seqstr_t request_controls;          /* control positions from a restored state */
     _Atomic uint32_t request_gen;
+    _Atomic int bank_list_read;         /* the host read the bank list: worth checking the folder */
+    uint64_t fingerprint;               /* worker only: the folder as last scanned */
     _Atomic int busy;                   /* the module's is_loading: a pick not yet playing */
     /* Control moves from the host, drained on the audio thread (the engine's
      * live settings have one writer). Dropped when a new preset is swapped in. */
@@ -150,8 +157,31 @@ static void publish_catalog(dspreset_instance_t *in, ds_catalog_t *next) {
     if (old && (node = malloc(sizeof(*node)))) { node->catalog = old; node->next = in->retired; in->retired = node; }
 }
 
+/* A cheap fingerprint of the instruments folder: its own modification time
+ * and each top-level entry's (a library copied in, removed, or changed at
+ * its top level shows here). One stat per library, not one per file. */
+static uint64_t folder_fingerprint(const char *dir_path) {
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+    uint64_t h = 1469598103934665603ull;
+    if (stat(dir_path, &st)) return 0;
+    h = (h ^ (uint64_t)st.st_mtime) * 1099511628211ull;
+    if (!(dir = opendir(dir_path))) return h;
+    while ((entry = readdir(dir)) != NULL) {
+        char path[1100];
+        if (entry->d_name[0] == '.') continue;
+        if (snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name) >= (int)sizeof(path) || stat(path, &st)) continue;
+        h = (h ^ (uint64_t)st.st_mtime ^ ((uint64_t)st.st_size << 20)) * 1099511628211ull;
+        for (const char *c = entry->d_name; *c; ++c) h = (h ^ (unsigned char)*c) * 1099511628211ull;
+    }
+    closedir(dir);
+    return h;
+}
+
 static void rescan(dspreset_instance_t *in) {
     ds_catalog_t *next = ds_catalog_scan(in->instruments);
+    in->fingerprint = folder_fingerprint(in->instruments);
     if (next) publish_catalog(in, next);
 }
 
@@ -349,7 +379,10 @@ static void *engine_worker(void *opaque) {
         } else if (failed_gen == gen && atomic_load(&in->request_gen) == seen_request) {
             atomic_store(&in->busy, 0);
         }
-        if (t - scanned_at >= RESCAN_MS) { rescan(in); scanned_at = t; }
+        if (t - scanned_at >= CHANGE_CHECK_MS && atomic_exchange(&in->bank_list_read, 0)) {
+            scanned_at = t;
+            if (folder_fingerprint(in->instruments) != in->fingerprint) rescan(in);
+        }
         if (t - perf_at >= PERF_REPORT_MS) {
             uint32_t blocks = atomic_exchange(&in->perf_blocks, 0), voices = atomic_exchange(&in->perf_voices_max, 0);
             uint64_t sum = atomic_exchange(&in->perf_ns_sum, 0), max = atomic_exchange(&in->perf_ns_max, 0);
@@ -652,6 +685,7 @@ static int get_param(void *opaque, const char *key, char *out, int out_len) {
     if (!strcmp(key, "is_loading")) return finish(snprintf(out, (size_t)out_len, "%d", atomic_load(&in->busy) ? 1 : 0), out_len);
     if (!strcmp(key, "bank_list")) {
         int k = snprintf(out, (size_t)out_len, "[");
+        atomic_store_explicit(&in->bank_list_read, 1, memory_order_relaxed);   /* the worker checks the folder */
         for (unsigned i = 0; c && i < c->bank_count; ++i) {
             char label[300];
             int need;
