@@ -201,7 +201,7 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     for (int i = 0; i < 4; ++i) e->amp_override[i] = -1.0f;
     e->bend_ratio = 1.0;
     e->rng = 0x12345678u;
-    for (int i = 0; i < DS_MAX_VOICES; ++i) { e->voices[i].generation = (uint32_t)i; e->stream_fd[i] = -1; }
+    for (int i = 0; i < DS_MAX_VOICES; ++i) { e->voices[i].generation = (uint32_t)i; e->stream_src[i].fd = -1; }
     if (snprintf(directory, sizeof(directory), "%s", preset_path) >= (int)sizeof(directory) ||
         !(slash = strrchr(directory, '/'))) { fail(error, error_len, "bad DSPreset path"); return -1; }
     *slash = '\0';
@@ -331,7 +331,7 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
 void ds_native_engine_destroy(ds_native_engine_t *e) {
     if (!e) return;
     for (unsigned i = 0; i < e->source_count; ++i) free(e->sources[i].head);
-    for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
+    for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->stream_key[i]) ds_wav_source_close(&e->stream_src[i]);
     for (int i = 0; i < DS_MAX_VOICES; ++i) free(e->voices[i].ring);
     for (unsigned x = 0; x < DS_MAX_EFFECTS; ++x) {
         ds_reverb_destroy(e->reverb[x]);
@@ -1362,13 +1362,12 @@ static void worker_bounds(const ds_voice_t *v, const ds_source_t *s, ds_bounds_t
     if (!b->loop || b->xf > b->loop_start || b->xf > b->loop_end - b->loop_start) b->xf = 0;
 }
 
-static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *z, const ds_bounds_t *b,
+static void fill(ds_native_engine_t *e, ds_voice_t *v, const ds_wav_source_t *file, const ds_zone_t *z, const ds_bounds_t *b,
                  uint64_t from, unsigned count) {
     const ds_source_t *s = &e->sources[z->source];
-    ds_wav_source_t file = s->file;
     unsigned ch = s->file.channels;
+    int fd = file->fd;
     char error[64];
-    file.fd = fd;
     while (count) {
         uint64_t f = map_frame(b, from);
         uint64_t limit = b->loop && f < b->loop_end ? b->loop_end : b->end;
@@ -1379,7 +1378,7 @@ static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *
         if (f < s->head_frames) {
             if (run > s->head_frames - f) run = (unsigned)(s->head_frames - f);
             memcpy(dst, s->head + f * ch, (size_t)run * ch * sizeof(float));
-        } else if (fd < 0 || ds_wav_source_read_frames(&file, f, dst, run, error, sizeof(error)) != (int)run) {
+        } else if (fd < 0 || ds_wav_source_read_frames(file, f, dst, run, error, sizeof(error)) != (int)run) {
             memset(dst, 0, (size_t)run * ch * sizeof(float));
         }
         if (b->xf && f + run > b->loop_end - b->xf) {       /* mix the loop crossfade in, here, off the audio thread */
@@ -1388,7 +1387,7 @@ static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *
             const float *far = NULL;
             if (first - len + n <= s->head_frames) far = s->head + (first - len) * ch;
             else if (fd >= 0 && e->xf_scratch && ch <= 8 &&
-                     ds_wav_source_read_frames(&file, first - len, e->xf_scratch, n, error, sizeof(error)) == (int)n)
+                     ds_wav_source_read_frames(file, first - len, e->xf_scratch, n, error, sizeof(error)) == (int)n)
                 far = e->xf_scratch;
             for (unsigned k = 0; far && k < n; ++k) {
                 float g_out, g_in, *out = dst + (size_t)(first - f + k) * ch;
@@ -1423,11 +1422,16 @@ unsigned ds_native_engine_service(ds_native_engine_t *e) {
         if (!b.loop && produced + count > b.end) count = b.end - produced;
         /* The voice's own descriptor, reopened when it starts a new note. */
         if (e->stream_key[i] != (word >> 32)) {
-            if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
-            e->stream_fd[i] = open(e->source_paths[z->source], O_RDONLY);
+            char error[64];
+            if (e->stream_key[i]) ds_wav_source_close(&e->stream_src[i]);
+            /* the file as it was read at load (a FLAC one gets its own decoder) */
+            if (ds_wav_source_open(&e->stream_src[i], e->source_paths[z->source], error, sizeof(error)) ||
+                e->stream_src[i].frame_count != e->sources[z->source].file.frame_count ||
+                e->stream_src[i].channels != e->sources[z->source].file.channels)
+                ds_wav_source_close(&e->stream_src[i]);
             e->stream_key[i] = word >> 32;
         }
-        fill(e, v, e->stream_fd[i], z, &b, produced, (unsigned)count);
+        fill(e, v, &e->stream_src[i], z, &b, produced, (unsigned)count);
         /* Publish only if the voice was not restarted meanwhile. */
         if (atomic_compare_exchange_strong_explicit(&v->stream, &word,
                                                     (word & ~0xffffffffull) | (uint32_t)(produced + count),

@@ -142,7 +142,7 @@ typedef struct {
     /* Worker only. Files are closed once their head is read, so a library of
      * any size holds at most one descriptor per STREAMING voice. The host
      * process's soft limit is 1024 and it is shared with everything else. */
-    int stream_fd[DS_MAX_VOICES];
+    ds_wav_source_t stream_src[DS_MAX_VOICES];   /* fd -1 = none open */
     uint64_t stream_key[DS_MAX_VOICES]; /* generation+zone the descriptor was opened for */
     float *xf_scratch;                  /* the far side of a loop crossfade, read from disk */
     uint64_t resident_bytes;

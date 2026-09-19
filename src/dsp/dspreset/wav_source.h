@@ -11,12 +11,14 @@ typedef struct {
     int big_endian;                                /* AIFF (and AIFF-C "NONE"/"twos"/"fl32") */
     int has_loop;                   /* the file's own 'smpl' loop, if any */
     uint64_t loop_start, loop_end;  /* frames, loop_end INCLUSIVE (smpl convention) */
+    struct ds_flac *flac;           /* a FLAC file's decoder (it has a position: one per reader) */
 } ds_wav_source_t;
 
-/* WAV (PCM 16/24/32, float 32, EXTENSIBLE) and AIFF / AIFF-C (PCM 8-32 big-
- * endian, "sowt" little-endian, "fl32" float) — the formats DecentSampler reads
- * apart from FLAC. A file's own loop (WAV 'smpl', AIFF INST sustain loop) is
- * reported so a zone without loop attributes can use it.
+/* WAV (PCM 16/24/32, float 32, EXTENSIBLE), AIFF / AIFF-C (PCM 8-32 big-
+ * endian, "sowt" little-endian, "fl32" float) and FLAC — the formats
+ * DecentSampler reads. A file's own loop (WAV 'smpl', AIFF INST sustain loop)
+ * is reported so a zone without loop attributes can use it; FLAC carries none.
+ * A FLAC source must not be copied to read with: its decoder is its own.
  *
  * Worker-only source access. The audio callback never calls these; it reads
  * the resident head and per-voice stream rings the worker fills. */

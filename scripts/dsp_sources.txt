@@ -8,6 +8,7 @@ src/dsp/dspreset/library_import.c
 src/dsp/dspreset/zip_index.c
 src/dsp/dspreset/zip_extract.c
 src/dsp/dspreset/wav_source.c
+src/dsp/dspreset/flac_source.c
 src/dsp/dspreset/catalog.c
 src/dsp/dspreset/preset_model.c
 src/dsp/dspreset/effects.c

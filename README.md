@@ -32,8 +32,8 @@ source.
 - **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
   with the preset's knobs setting their depth, rate and times.
 
-Not yet: phaser and the other remaining effects, tempo-synced delay (their knobs show up
-but do nothing yet), and FLAC samples.
+Not yet: phaser and the other remaining effects, and tempo-synced delay (their knobs show
+up but do nothing yet).
 
 ## Using it
 

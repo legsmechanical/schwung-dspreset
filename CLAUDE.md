@@ -265,12 +265,22 @@ above the threshold; autoBypass fades the whole effect (50 ms) while under the t
 and 0 dB gains are exactly transparent. A sine reads ~0.6 dB less reduction than the static
 curve: the follower rides below its peaks (the test measures the curve on a steady level).
 
+## FLAC
+
+`flac_source.c` wraps dr_flac (vendored in `src/dsp/dspreset/third_party/`, MIT-0, notice in
+THIRD_PARTY.md) over OUR descriptor, so the open-file count is unchanged. A decoder has a
+position, so a FLAC `ds_wav_source_t` must never be copied to read with: the worker now opens a
+whole `ds_wav_source_t` per streaming voice (`e->stream_src[]`, was a bare fd) — for WAV that
+is the same file, for FLAC its own decoder; a read elsewhere seeks first (loops, restarts).
+Fixtures in `tests/fixtures/flac/` are real ffmpeg encodes of `test_signal24` (README there):
+decoded bit-exact, and 0 LSB through the plugin.
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
 delay, convolution, pitch shift, wave shaper/folder, stereo simulator, group-level reverb /
 chorus / delay.
-Also: envelope curve shapes, FLAC samples, musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
+Also: envelope curve shapes, musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 
 ## Build, test, deploy

@@ -1,4 +1,5 @@
 #include "wav_source.h"
+#include "flac_source.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -102,6 +103,14 @@ int ds_wav_source_open(ds_wav_source_t *source, const char *path,
     if (read(source->fd, header, sizeof(header)) != (ssize_t)sizeof(header)) {
         fail(error, error_len, "not an audio file"); ds_wav_source_close(source); return -1;
     }
+    if (!memcmp(header, "fLaC", 4)) {
+        if (!(source->flac = ds_flac_open(source->fd, &source->sample_rate, &source->channels,
+                                          &source->bits_per_sample, &source->frame_count)) || !source->frame_count) {
+            fail(error, error_len, "unsupported or malformed FLAC file"); ds_wav_source_close(source); return -1;
+        }
+        source->format = 1;
+        return 0;
+    }
     if (!memcmp(header, "FORM", 4) && (!memcmp(header + 8, "AIFF", 4) || !memcmp(header + 8, "AIFC", 4))) {
         if (open_aiff(source, !memcmp(header + 8, "AIFC", 4)) || !source->channels || !encoding_supported(source)) {
             fail(error, error_len, "unsupported or malformed AIFF file"); ds_wav_source_close(source); return -1;
@@ -156,8 +165,11 @@ int ds_wav_source_open(ds_wav_source_t *source, const char *path,
 }
 
 void ds_wav_source_close(ds_wav_source_t *source) {
-    if (source && source->fd >= 0) close(source->fd);
-    if (source) source->fd = -1;
+    if (!source) return;
+    ds_flac_close(source->flac);
+    source->flac = NULL;
+    if (source->fd >= 0) close(source->fd);
+    source->fd = -1;
 }
 
 int ds_wav_source_read_frames(const ds_wav_source_t *source, uint64_t frame,
@@ -167,6 +179,11 @@ int ds_wav_source_read_frames(const ds_wav_source_t *source, uint64_t frame,
     unsigned bytes_per_sample, bytes_per_frame, done = 0;
     if (!source || source->fd < 0 || !interleaved || frame >= source->frame_count) return -1;
     if (frame_count > source->frame_count - frame) frame_count = (unsigned)(source->frame_count - frame);
+    if (source->flac) {
+        int got = ds_flac_read(source->flac, frame, interleaved, frame_count);
+        if (got != (int)frame_count) { fail(error, error_len, "cannot read FLAC frames"); return -1; }
+        return got;
+    }
     bytes_per_sample = source->bits_per_sample / 8u;
     bytes_per_frame = source->channels * bytes_per_sample;
     while (done < frame_count) {
