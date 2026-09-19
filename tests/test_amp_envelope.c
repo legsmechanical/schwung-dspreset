@@ -145,8 +145,8 @@ int main(void) {
         CHECK(strstr(value, "{\"key\":\"amp_release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":20,\"step\":0.001,\"unit\":\"sec\""));
         CHECK(strstr(value, "{\"key\":\"amp_sustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"unit\":\"%\""));
         plugin_get(&p, "ui_hierarchy", value, sizeof(value));
-        CHECK(strstr(value, "{\"level\":\"amp\",\"label\":\"Amp Envelope\"}"));
-        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"]"));
+        CHECK(strstr(value, "{\"level\":\"amp\",\"label\":\"Amp/Voice\"}]"));
+        CHECK(strstr(value, "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\",\"\",\"gain\"]"));
         plugin_get(&p, "chain_params", value, sizeof(value));
         CHECK(strstr(value, "{\"key\":\"polyphony\",\"name\":\"Polyphony\",\"type\":\"enum\",\"options\":[\"Preset\",\"1\",\"2\""));
         CHECK(strstr(value, ",\"64\"],\"default\":0}"));

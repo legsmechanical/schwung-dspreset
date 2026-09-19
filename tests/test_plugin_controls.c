@@ -61,7 +61,7 @@ int main(void) {
     CHECK(plugin_uint(&p, "load_count") == 1 && !plugin_uint(&p, "is_loading"));
 
     plugin_get(&p, "ui_hierarchy", value, sizeof(value));
-    CHECK(strstr(value, "\"knobs\":[\"ctl_0\",\"ctl_1\",\"ctl_2\",\"ctl_3\",\"ctl_4\",\"ctl_5\",\"gain\"]"));
+    CHECK(strstr(value, "\"knobs\":[\"ctl_0\",\"ctl_1\",\"ctl_2\",\"ctl_3\",\"ctl_4\",\"ctl_5\"]},"));
     plugin_get(&p, "chain_params", value, sizeof(value));
     CHECK(strstr(value, "{\"key\":\"ctl_0\",\"name\":\"Close\",\"type\":\"float\",\"min\":0,\"max\":1"));
     CHECK(strstr(value, "{\"key\":\"ctl_3\",\"name\":\"Layer\",\"type\":\"enum\",\"options\":[\"A\",\"B\"]"));

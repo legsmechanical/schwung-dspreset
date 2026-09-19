@@ -575,25 +575,26 @@ static int append(char *out, int k, int n, const char *fmt, ...) {
     return w < 0 ? k : (k + w < n ? k + w : n - 1);
 }
 
-/* The preset's own controls come first on the knobs, Gain after them: the
- * page you land on plays the preset the way its author laid it out. */
-/* The Amp Envelope page puts Attack..Release on knobs 1-4 — one ROW of the
+/* The root knobs are the preset's own controls: the page you land on plays
+ * the preset the way its author laid it out. */
+/* The Amp/Voice page puts Attack..Release on knobs 1-4 — one ROW of the
  * grid, which is what lets both hosts draw them as an envelope (a graphic
  * never straddles the row break; with Override first they drew as four
- * faders) — and Override on knob 5. tests/test_pages.mjs checks it with the
- * hosts' own planner. */
+ * faders) — Override on knob 5, Polyphony on 6, knob 7 blank ("" draws a gap;
+ * null would be dropped and slide Gain up) and Gain on 8 (Josh, 2026-09-19).
+ * tests/test_pages.mjs checks it with the hosts' own planner. */
 static int write_hierarchy(const ds_native_engine_t *e, char *out, int n) {
     int k = append(out, 0, n, "{\"levels\":{\"root\":{\"name\":\"DSPreset\",\"list_param\":\"preset\","
                    "\"count_param\":\"preset_count\",\"name_param\":\"preset_name\","
                    "\"params\":[{\"level\":\"banks\",\"label\":\"Banks\"}");
     unsigned controls = e ? e->model.control_count : 0;
     for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, ",\"ctl_%u\"", i);
-    k = append(out, k, n, ",{\"level\":\"amp\",\"label\":\"Amp Envelope\"},\"gain\"],\"knobs\":[");
-    for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "\"ctl_%u\",", i);
-    return append(out, k, n, "\"gain\"]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
+    k = append(out, k, n, ",{\"level\":\"amp\",\"label\":\"Amp/Voice\"}],\"knobs\":[");
+    for (unsigned i = 0; i < controls; ++i) k = append(out, k, n, "%s\"ctl_%u\"", i ? "," : "", i);
+    return append(out, k, n, "]},\"banks\":{\"name\":\"Banks\",\"label\":\"Select Bank\","
                   "\"items_param\":\"bank_list\",\"select_param\":\"bank\",\"navigate_to\":\"root\"},"
-                  "\"amp\":{\"name\":\"Amp Envelope\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"],"
-                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\"]}}}");
+                  "\"amp\":{\"name\":\"Amp/Voice\",\"params\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\",\"gain\"],"
+                  "\"knobs\":[\"amp_attack\",\"amp_decay\",\"amp_sustain\",\"amp_release\",\"amp_override\",\"polyphony\",\"\",\"gain\"]}}}");
 }
 
 static int write_chain_params(const ds_native_engine_t *e, unsigned banks, unsigned presets, char *out, int n) {

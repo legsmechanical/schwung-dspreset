@@ -30,13 +30,11 @@
               "label": "Banks"
             },
             {
-              "key": "gain",
-              "name": "Gain"
+              "level": "amp",
+              "label": "Amp/Voice"
             }
           ],
-          "knobs": [
-            "gain"
-          ]
+          "knobs": []
         },
         "banks": {
           "name": "Banks",
@@ -44,6 +42,28 @@
           "items_param": "bank_list",
           "select_param": "bank",
           "navigate_to": "root"
+        },
+        "amp": {
+          "name": "Amp/Voice",
+          "params": [
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "amp_override",
+            "polyphony",
+            "gain"
+          ],
+          "knobs": [
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "amp_override",
+            "polyphony",
+            "",
+            "gain"
+          ]
         }
       }
     },

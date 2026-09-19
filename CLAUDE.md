@@ -70,7 +70,7 @@ jog-click picker's "DSPreset Presets" row.
 ## Preset controls
 
 Each `<ui>` knob, button and menu is a param `ctl_N` (float/int, or enum of its state/option
-names), listed first on the root knobs, Gain last. Moving one fires its bindings through their
+names), the root knobs in the preset's order (Gain lives on Amp/Voice). Moving one fires its bindings through their
 translation (linear with output range, `table` — the knob position scales the table's key axis,
 the old converter's reading — or `fixed_value`, then `factor`).
 
@@ -133,9 +133,11 @@ The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 
 ## The module's amp envelope (every preset)
 
-An **Amp Envelope** page: Attack / Decay / Sustain / Release as NUMERIC knobs 1–4 (sec, sec,
-%, sec) declared `viz: envelope`, and an **Override** switch on knob 5 (Josh, 2026-09-18: a
-switch, not stepped "Preset" knobs). ⚠ The four MUST sit in one row of the grid: with Override
+An **Amp/Voice** page: Attack / Decay / Sustain / Release as NUMERIC knobs 1–4 (sec, sec,
+%, sec) declared `viz: envelope`, an **Override** switch on knob 5 (Josh, 2026-09-18: a
+switch, not stepped "Preset" knobs), Polyphony on 6, knob 7 BLANK and **Gain** on 8 (Josh,
+2026-09-19). The blank is `""` in `knobs` — a real gap; `null` would be dropped and slide Gain
+to knob 7. Do not tidy it out. ⚠ The four MUST sit in one row of the grid: with Override
 on knob 1 they straddled the row break and both hosts drew four faders — every C test was
 green. `tests/test_pages.mjs` lays the pages out with the hosts' own planner
 (`DSPRESET_PAGES_DIR`) and fails if the envelope is not drawn.
