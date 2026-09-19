@@ -72,7 +72,8 @@ its own pages; it has one stereo output and no MPE input path.
 
 ## Decision (Josh, 2026-09-19)
 
-**Go:** every item in Tiers 1 and 2 that needs no recording — items 3–8 and 10–22.
+**Go:** every item in Tiers 1 and 2 that needs no recording — items 3–7 and 10–22.
+**Skipped for now:** item 8, convolution (Josh, same day).
 **Waiting on recordings from DecentSampler:** items 1, 2 and 9 (and all of Tier 3).
 **Not now:** Tier 4. **Dropped:** the list above.
 
