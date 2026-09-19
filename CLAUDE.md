@@ -275,6 +275,15 @@ is the same file, for FLAC its own decoder; a read elsewhere seeks first (loops,
 Fixtures in `tests/fixtures/flac/` are real ffmpeg encodes of `test_signal24` (README there):
 decoded bit-exact, and 0 LSB through the plugin.
 
+## A library's own menu
+
+`DSLibraryInfo.xml` (at the bank's root, or in its one folder — a .dslibrary's usual wrapper):
+its `name` becomes the bank's name; `<presetMenu>` reorders the bank's presets without moving
+them (top level alphabetical — menus and unmentioned presets together; a menu in written order;
+nested menus flattened to "Pads / Analog / Drift"; missing files skipped, empty menus dropped;
+nothing usable → the plain list). `ds_catalog_equal` compares names too, so a rename
+republishes. No installed library has one (checked on the Move, 2026-09-19).
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
