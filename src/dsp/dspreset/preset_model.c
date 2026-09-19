@@ -154,6 +154,7 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     b->axis = !strcmp(param, "X_VALUE") ? 0 : !strcmp(param, "Y_VALUE") ? 1 : -1;
     b->by_name = b->target == DS_TARGET_CONTROL_VALUE && strcmp(param, "VALUE") && b->axis < 0;
     b->trigger_on_load = !(attr(a, e, "triggerOnLoad", text, sizeof(text)) && !strcasecmp(text, "false"));
+    if (!attr_num(a, e, "modAmount", &b->mod_amount)) b->mod_amount = 1;
     b->disabled = attr(a, e, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0"));
     b->position = -1;
     if (attr_num(a, e, "position", &f) || attr_num(a, e, "groupIndex", &f) || attr_num(a, e, "effectIndex", &f) ||
@@ -209,8 +210,13 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     if (b->target == DS_TARGET_MODULATOR && attr_num(a, e, "modulatorIndex", &f)) b->position = (int)f;
     if (attr(a, e, "translationValue", text, sizeof(text))) {
         char *tail;
-        if (!strcasecmp(text, "true") || !strcasecmp(text, "normal")) b->fixed = 1;   /* normal: SILENCING_MODE */
-        else if (!strcasecmp(text, "false") || !strcasecmp(text, "fast")) b->fixed = 0;
+        /* words a fixed value may be: SILENCING_MODE, an LFO's SHAPE (DS_LFO_*), TRIGGER */
+        if (!strcasecmp(text, "true") || !strcasecmp(text, "normal") || !strcasecmp(text, "attack")) b->fixed = 1;
+        else if (!strcasecmp(text, "false") || !strcasecmp(text, "fast") || !strcasecmp(text, "none")) b->fixed = 0;
+        else if (!strcasecmp(text, "sine")) b->fixed = DS_LFO_SINE;
+        else if (!strcasecmp(text, "square")) b->fixed = DS_LFO_SQUARE;
+        else if (!strcasecmp(text, "saw")) b->fixed = DS_LFO_SAW;
+        else if (!strcasecmp(text, "triangle")) b->fixed = DS_LFO_TRIANGLE;
         else {
             b->fixed = strtof(text, &tail);
             while (isspace((unsigned char)*tail)) ++tail;
@@ -314,7 +320,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     long length;
     char *xml, *p, *w;
     int in_ui = 0, in_midi = 0, in_mod = 0, in_effects = 0, in_group = 0;
-    int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1, pad = -1, ui_count = 0;
+    int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1, pad = -1, ui_count = 0, in_velocity = 0;
     memset(m, 0, sizeof(*m));
     group_settings(&m->instrument, NULL, NULL, 1);
     for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { m->tag_volume[t] = 1; m->tag_enabled[t] = 1; m->tag_polyphony[t] = -1; }
@@ -356,7 +362,22 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
         if (tag_is(tag, "ui")) { in_ui = !closing && !self_closing; continue; }
         if (tag_is(tag, "midi")) { in_midi = !closing && !self_closing; continue; }
         if (tag_is(tag, "modulators")) { in_mod = !closing && !self_closing; modulator = -1; continue; }
-        if (in_mod && (tag_is(tag, "lfo") || tag_is(tag, "envelope") || tag_is(tag, "midiCC") || tag_is(tag, "midiVelocity"))) {
+        if (in_midi && tag_is(tag, "velocity")) {
+            /* <midi><velocity>: its bindings follow each note's velocity, as a
+             * per-note <midiVelocity> modulator's would */
+            if (closing) { modulator = -1; in_velocity = 0; continue; }
+            if (m->modulator_count == DS_MAX_MODULATORS || self_closing) continue;
+            memset(&m->modulators[m->modulator_count], 0, sizeof(ds_modulator_t));
+            m->modulators[m->modulator_count].kind = DS_MOD_VELOCITY;
+            m->modulators[m->modulator_count].voice_scope = 1;
+            m->modulators[m->modulator_count].mod_amount = 1;
+            m->modulators[m->modulator_count].first_binding = m->binding_count;
+            modulator = (int)m->modulator_count++;
+            in_velocity = 1;
+            continue;
+        }
+        if (in_mod && (tag_is(tag, "lfo") || tag_is(tag, "envelope") || tag_is(tag, "midiCC") || tag_is(tag, "midiVelocity") ||
+                       tag_is(tag, "random"))) {
             ds_modulator_t *mod;
             char text[32];
             float v;
@@ -365,10 +386,13 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             mod = &m->modulators[m->modulator_count];
             memset(mod, 0, sizeof(*mod));
             mod->kind = tag_is(tag, "lfo") ? DS_MOD_LFO : tag_is(tag, "envelope") ? DS_MOD_ENVELOPE :
-                        tag_is(tag, "midiCC") ? DS_MOD_CC : DS_MOD_VELOCITY;
+                        tag_is(tag, "midiCC") ? DS_MOD_CC : tag_is(tag, "random") ? DS_MOD_RANDOM : DS_MOD_VELOCITY;
+            mod->trigger = attr(a, end, "trigger", text, sizeof(text)) && !strcasecmp(text, "attack");
+            mod->periodic = attr(a, end, "mode", text, sizeof(text)) && !strcasecmp(text, "periodic");
+            mod->seed = attr_num(a, end, "seed", &v) ? (uint32_t)(int64_t)v : 0;
             { char tags[256]; if (attr(a, end, "tags", tags, sizeof(tags))) mod->tag_mask = ds_preset_model_tag_mask(m, tags); }
-            /* scope: LFOs default to one shared instance, the rest to one per note */
-            mod->voice_scope = mod->kind != DS_MOD_LFO;
+            /* scope: LFOs (and random) default to one shared instance, the rest to one per note */
+            mod->voice_scope = mod->kind != DS_MOD_LFO && mod->kind != DS_MOD_RANDOM;
             if (attr(a, end, "scope", text, sizeof(text))) mod->voice_scope = !strcmp(text, "voice");
             mod->shape = DS_LFO_SINE;
             if (attr(a, end, "shape", text, sizeof(text))) {
@@ -537,7 +561,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             }
             continue;
         }
-        if (!closing && tag_is(tag, "binding") && in_mod && modulator >= 0 && m->binding_count < MAX_BINDINGS) {
+        if (!closing && tag_is(tag, "binding") && (in_mod || in_velocity) && modulator >= 0 && m->binding_count < MAX_BINDINGS) {
             parse_binding(m, a, end, &m->bindings[m->binding_count++]);
             m->modulators[modulator].binding_count++;
             continue;

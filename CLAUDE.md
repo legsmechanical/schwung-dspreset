@@ -219,6 +219,14 @@ is missing from the guide copy): we count only knobs, buttons, menus and pads, a
 binding `enabled="false"`, and `triggerOnLoad="false"` (held back while `initialising`: the
 load's control pass and the plugin's restore loop) are honoured.
 
+## More modulators
+
+`<random>` (-1..1, a new value per note-on — or `frequency` times a second with
+`mode="periodic"` — from its own generator, seeded by `seed`), an envelope's delay
+(`delayTime` / MOD_DELAY_TIME: 0 until it runs out), LFO SHAPE (fixed words sine/square/saw/
+triangle), TRIGGER / `trigger="attack"` (a GLOBAL LFO or random restarts at each note-on), and
+`<midi><velocity>` (a voice-scope velocity modulator; each binding's own `modAmount` scales it).
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced

@@ -40,7 +40,7 @@ enum {
 /* How a modulator's value lands on its target (DecentSampler's modBehavior;
  * its default is set). */
 enum { DS_MODB_SET = 0, DS_MODB_ADD, DS_MODB_MULTIPLY, DS_MODB_MODULATE };
-enum { DS_MOD_LFO = 0, DS_MOD_ENVELOPE, DS_MOD_CC, DS_MOD_VELOCITY };
+enum { DS_MOD_LFO = 0, DS_MOD_ENVELOPE, DS_MOD_CC, DS_MOD_VELOCITY, DS_MOD_RANDOM };
 enum { DS_LFO_SINE = 0, DS_LFO_SQUARE, DS_LFO_SAW, DS_LFO_TRIANGLE };
 
 typedef struct {
@@ -60,6 +60,7 @@ typedef struct {
     /* type control: the control is named by its parameterName (BassForge's
      * CC maps) rather than by index; axis 0/1 = X_VALUE/Y_VALUE of a pad */
     int by_name, axis;
+    float mod_amount;                 /* a binding's own modAmount (<midi><velocity>), default 1 */
     int trigger_on_load;              /* 0: not fired when the preset loads or a project restores */
     int disabled;                     /* enabled="false" */
 } ds_binding_t;
@@ -72,6 +73,9 @@ typedef struct {
     float attack, decay, sustain, release;
     unsigned first_binding, binding_count;
     uint64_t tag_mask;                /* for modulatorTags */
+    int trigger;                      /* 1: a global one restarts at every note-on (trigger="attack") */
+    int periodic;                     /* <random mode="periodic">: a new value `frequency` times a second */
+    uint32_t seed;                    /* <random seed>, 0 = none */
 } ds_modulator_t;
 
 typedef struct { char name[32]; unsigned first_binding, binding_count; } ds_choice_t;

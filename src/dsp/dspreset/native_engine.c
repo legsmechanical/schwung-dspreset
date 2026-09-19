@@ -45,6 +45,8 @@ static inline int xf_gains(const ds_bounds_t *b, uint64_t f, float *out_gain, fl
     return 1;
 }
 
+static float random_next(uint32_t *rng);
+
 /* ---- loading ------------------------------------------------------------ */
 
 typedef struct { ds_native_engine_t *engine; char *error; unsigned error_len; } collect_t;
@@ -297,6 +299,8 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     for (unsigned k = 0; k < e->model.modulator_count; ++k) {
         const ds_modulator_t *m = &e->model.modulators[k];
         e->mod_global[k].stage = DS_ENV_DONE;                         /* a global envelope waits for a key */
+        e->mod_rng[k] = m->seed ? m->seed : 0x9e3779b9u * (k + 1);
+        if (m->kind == DS_MOD_RANDOM) e->mod_global[k].level = random_next(&e->mod_rng[k]);
         for (unsigned i = 0; i < m->binding_count; ++i) {
             const ds_binding_t *b = &e->model.bindings[m->first_binding + i];
             if (b->target != DS_TARGET_EFFECT) continue;
@@ -463,7 +467,9 @@ static void set_modulator_value(ds_modulator_t *m, const char *token, float v) {
     else if (!strcmp(token, "ENV_DECAY")) m->decay = v < 0 ? 0 : v;
     else if (!strcmp(token, "ENV_SUSTAIN")) m->sustain = v;
     else if (!strcmp(token, "ENV_RELEASE")) m->release = v < 0 ? 0 : v;
-    else if (!strcmp(token, "DELAY_TIME")) m->delay = v < 0 ? 0 : v;
+    else if (!strcmp(token, "DELAY_TIME") || !strcmp(token, "MOD_DELAY_TIME")) m->delay = v < 0 ? 0 : v;
+    else if (!strcmp(token, "SHAPE")) { int k = (int)lrintf(v); m->shape = k < DS_LFO_SINE || k > DS_LFO_TRIANGLE ? DS_LFO_SINE : k; }
+    else if (!strcmp(token, "TRIGGER")) m->trigger = v >= 0.5f;
 }
 
 static void control_changed(ds_native_engine_t *e, unsigned index, float value, int depth);
@@ -581,11 +587,18 @@ void ds_native_engine_set_control(ds_native_engine_t *e, unsigned index, float v
 
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
-static void mod_start(const ds_modulator_t *m, ds_mod_state_t *st) {
+/* A <random>'s next value, -1..1. */
+static float random_next(uint32_t *rng) {
+    *rng = *rng * 1664525u + 1013904223u;
+    return (float)(*rng >> 8) / 8388607.5f - 1.0f;
+}
+
+static void mod_start(const ds_modulator_t *m, ds_mod_state_t *st, uint32_t *rng) {
     st->phase = 0;
     st->delay_left = m->delay;
     st->level = m->attack > 0 ? 0.0f : 1.0f;
     st->stage = m->attack > 0 ? DS_ENV_ATTACK : DS_ENV_DECAY;
+    if (m->kind == DS_MOD_RANDOM) st->level = random_next(rng);
 }
 
 static void mod_release(ds_mod_state_t *st) { if (st->stage != DS_ENV_DONE) st->stage = DS_ENV_RELEASE; }
@@ -600,15 +613,23 @@ static float mod_value(const ds_native_engine_t *e, const ds_modulator_t *m, con
               m->shape == DS_LFO_TRIANGLE ? 1.0f - 4.0f * fabsf(p - 0.5f) :
               sinf(2.0f * (float)M_PI * p);
         break;
-    case DS_MOD_ENVELOPE: raw = st->stage == DS_ENV_DONE ? 0 : st->level; break;
+    case DS_MOD_ENVELOPE: raw = st->stage == DS_ENV_DONE || st->delay_left > 0 ? 0 : st->level; break;
+    case DS_MOD_RANDOM: raw = st->level; break;
     case DS_MOD_CC: raw = m->cc >= 0 && m->cc < 128 ? e->cc_value[m->cc] : 0; break;
     default: raw = velocity; break;
     }
     return raw * m->mod_amount;
 }
 
-static void mod_advance(const ds_modulator_t *m, ds_mod_state_t *st, unsigned frames, float rate) {
+static void mod_advance(const ds_modulator_t *m, ds_mod_state_t *st, unsigned frames, float rate, uint32_t *rng) {
     float dt = (float)frames / rate, sustain = clamp01(m->sustain);
+    if (m->kind == DS_MOD_RANDOM) {
+        if (!m->periodic || m->frequency <= 0) return;
+        st->phase += m->frequency * dt;                    /* a new value each 1/frequency s */
+        while (st->phase >= 1.0f) { st->phase -= 1.0f; st->level = random_next(rng); }
+        return;
+    }
+    if (m->kind == DS_MOD_ENVELOPE && st->delay_left > 0) { st->delay_left -= dt; return; }   /* MOD_DELAY_TIME */
     if (m->kind == DS_MOD_LFO) {
         if (st->delay_left > 0) { st->delay_left -= dt; return; }
         st->phase += m->frequency * dt;
@@ -644,8 +665,8 @@ static float mod_apply(int behavior, float base, float t, float neutral) {
 
 /* The translated value `b` delivers for a modulator value, and for neutral. */
 static void mod_translate(const ds_modulator_t *m, const ds_binding_t *b, float value, float *t, float *neutral) {
-    float lo = m->kind == DS_MOD_LFO ? -1.0f : 0.0f;
-    *t = ds_binding_translate(b, lo, 1.0f, value);
+    float lo = m->kind == DS_MOD_LFO || m->kind == DS_MOD_RANDOM ? -1.0f : 0.0f;
+    *t = ds_binding_translate(b, lo, 1.0f, value * b->mod_amount);
     *neutral = ds_binding_translate(b, lo, 1.0f, 0.0f);
 }
 
@@ -780,7 +801,7 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
             v->fx_count++;
         }
     for (unsigned k = 0; k < e->model.modulator_count; ++k)
-        if (e->model.modulators[k].voice_scope) mod_start(&e->model.modulators[k], &v->mods[k]);
+        if (e->model.modulators[k].voice_scope) mod_start(&e->model.modulators[k], &v->mods[k], &e->mod_rng[k]);
     v->note = note; v->velocity = velocity;
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
     v->age = ++e->age_counter;
@@ -946,7 +967,13 @@ void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
     if (!e->note_velocity[note] && e->keys_held++ == 0)     /* a global envelope starts with the first key */
         for (unsigned k = 0; k < e->model.modulator_count; ++k)
             if (!e->model.modulators[k].voice_scope && e->model.modulators[k].kind == DS_MOD_ENVELOPE)
-                mod_start(&e->model.modulators[k], &e->mod_global[k]);
+                mod_start(&e->model.modulators[k], &e->mod_global[k], &e->mod_rng[k]);
+    for (unsigned k = 0; k < e->model.modulator_count; ++k) {  /* trigger="attack", and a note-on <random>: every key */
+        const ds_modulator_t *m = &e->model.modulators[k];
+        if (m->voice_scope) continue;
+        if ((m->kind == DS_MOD_LFO && m->trigger) || (m->kind == DS_MOD_RANDOM && (m->trigger || !m->periodic)))
+            mod_start(m, &e->mod_global[k], &e->mod_rng[k]);
+    }
     e->note_velocity[note] = velocity;
     enforce_note_limit(e);
     e->note_counter++;
@@ -1096,7 +1123,7 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
         const ds_modulator_t *m = &e->model.modulators[k];
         if (m->voice_scope) continue;
         e->mod_global_value[k] = mod_value(e, m, &e->mod_global[k], 0);
-        mod_advance(m, &e->mod_global[k], frames, (float)e->output_rate);
+        mod_advance(m, &e->mod_global[k], frames, (float)e->output_rate, &e->mod_rng[k]);
     }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];
@@ -1149,7 +1176,7 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
             }
         }
         for (unsigned k = 0; k < e->model.modulator_count; ++k)
-            if (e->model.modulators[k].voice_scope) mod_advance(&e->model.modulators[k], &v->mods[k], frames, (float)e->output_rate);
+            if (e->model.modulators[k].voice_scope) mod_advance(&e->model.modulators[k], &v->mods[k], frames, (float)e->output_rate, &e->mod_rng[k]);
         underruns += v->underruns;
     }
     for (unsigned x = 0; x < e->model.effect_count; ++x) {

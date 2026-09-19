@@ -77,6 +77,9 @@ its own pages; it has one stereo output and no MPE input path.
   LO/HI_NOTE, LO/HI_VEL, AMP_ENV_ENABLED, GROUP_VOLUME — built, tested.
 - 2026-09-19: items 6 (XY pads), 7 (CC → control by name), 17 (controlTags / modulatorTags /
   sampleTags), 18 (triggerOnLoad) — built, tested. BassForge's filter pads now work.
+- 2026-09-19: item 15 (`<midi><velocity>`), item 16's LFO SHAPE / MOD_DELAY_TIME / TRIGGER, an
+  envelope's delay, and the `<random>` modulator (found in the guide during this work; not in the
+  first survey) — built, tested.
 
 ## Decision (Josh, 2026-09-19)
 

@@ -59,7 +59,7 @@ enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE 
 /* One modulator's running state: an LFO's phase (and its start delay), or an
  * envelope's stage and level. Held per note for voice-scope modulators and
  * once in the engine for global ones. Advanced once per block. */
-typedef struct { float phase, level, delay_left; int stage; } ds_mod_state_t;
+typedef struct { float phase, level, delay_left; int stage; } ds_mod_state_t;   /* <random>: level is the value */
 
 /* The effect settings a modulated effect's coefficients were last built from:
  * rebuilt only when one of them has actually moved (a held envelope sits still,
@@ -148,6 +148,7 @@ typedef struct {
      * modulator reaches (only those pay for per-block coefficients). */
     ds_mod_state_t mod_global[DS_MAX_MODULATORS];
     float mod_global_value[DS_MAX_MODULATORS];
+    uint32_t mod_rng[DS_MAX_MODULATORS];    /* each <random>'s generator (its seed, when it has one) */
     float cc_value[128];
     unsigned keys_held;
     unsigned char fx_modulated[DS_MAX_EFFECTS];
