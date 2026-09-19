@@ -67,6 +67,30 @@ int main(void) {
     CHECK(strstr(value, "{\"key\":\"ctl_3\",\"name\":\"Layer\",\"type\":\"enum\",\"options\":[\"A\",\"B\"]"));
     CHECK(strstr(value, "\"name\":\"Tune\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\"]"));
 
+    /* The hosts' own mod wheel reset (CC1 = 0 on every channel, tagged as
+     * host-generated, at boot and at every patch load) must not move a knob
+     * the preset maps CC1 onto: ASIMOV's filter shut to ~70 Hz and the project
+     * saved it that way. A player's wheel still moves it, and the hosts'
+     * panic (CC123, also host-tagged) still stops notes. */
+    {
+        uint8_t reset[3] = {0xb0, 1, 0}, on[3] = {0x90, 60, 100}, panic[3] = {0xb0, 123, 0};
+        for (int ch = 0; ch < 16; ++ch) { reset[0] = (uint8_t)(0xb0 | ch); p.api->on_midi(p.instance, reset, 3, 3 /* MOVE_MIDI_SOURCE_HOST */); }
+        plugin_get(&p, "ctl_0", value, sizeof(value));
+        CHECK(!strcmp(value, "1.0000"));
+        reset[0] = 0xb0;
+        p.api->on_midi(p.instance, reset, 3, 0);
+        plugin_get(&p, "ctl_0", value, sizeof(value));
+        CHECK(!strcmp(value, "0.0000"));
+        p.api->set_param(p.instance, "ctl_2", "0");         /* release 0, so the panic ends it here */
+        p.api->on_midi(p.instance, on, 3, 0);
+        render(&p, 1);
+        CHECK(plugin_uint(&p, "voices") > 0);
+        p.api->on_midi(p.instance, panic, 3, 3 /* MOVE_MIDI_SOURCE_HOST */);
+        render(&p, 200);
+        CHECK(plugin_uint(&p, "voices") == 0);
+        p.api->set_param(p.instance, "ctl_2", "3.5");
+    }
+
     /* a move from the host reads back at once, and lands on the audio thread */
     p.api->set_param(p.instance, "ctl_0", "0.25");
     plugin_get(&p, "ctl_0", value, sizeof(value));

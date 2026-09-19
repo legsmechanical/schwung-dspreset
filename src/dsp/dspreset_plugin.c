@@ -446,11 +446,21 @@ static void sync_amp(dspreset_instance_t *in, ds_native_engine_t *engine) {
         engine->amp_override[i] = on ? atomic_load_explicit(&in->amp_value[i], memory_order_relaxed) : -1.0f;
 }
 
+/* MOVE_MIDI_SOURCE_HOST: a message the host made up rather than one played. */
+#define MIDI_SOURCE_HOST 3
+
 static void on_midi(void *opaque, const uint8_t *msg, int len, int source) {
     dspreset_instance_t *in = opaque;
     ds_native_engine_t *engine;
-    (void)source;
     if (!in || len < 2) return;
+    /* Both hosts send CC1 = 0 on every channel at boot and at every patch
+     * load, to clear a mod wheel Move left raised. For a preset that maps CC1
+     * onto a knob it is not a clear but a move: ASIMOV's filter went to its
+     * minimum (~70 Hz) and the project saved it silent. The knob already holds
+     * the preset's (or the project's) value, so there is nothing to clear;
+     * a player's wheel still moves it. Panic (CC123) is host-made too, and
+     * still passes. */
+    if (source == MIDI_SOURCE_HOST && len >= 3 && (msg[0] & 0xf0) == 0xb0 && msg[1] == 1) return;
     atomic_fetch_add(&in->audio_users, 1);
     engine = atomic_load(&in->active);
     if (engine) {
