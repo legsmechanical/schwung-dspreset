@@ -14,7 +14,7 @@
 #include "preset_model.h"
 
 enum { DS_FX_BYPASS = 0, DS_FX_BIQUAD, DS_FX_ONEPOLE, DS_FX_GAIN, DS_FX_REVERB, DS_FX_CHORUS, DS_FX_DELAY,
-       DS_FX_UNSUPPORTED };
+       DS_FX_BITCRUSHER, DS_FX_GATE, DS_FX_COMPRESSOR, DS_FX_UNSUPPORTED };
 
 typedef struct {
     int kind;
@@ -24,6 +24,10 @@ typedef struct {
     float room, damping, wet;       /* reverb: DecentSampler's settings (reverb.c maps them); delay's wet too */
     float mix, depth, rate;         /* chorus */
     float time, offset, feedback;   /* delay, seconds */
+    float bits, reduction;          /* bit crusher (mix above) */
+    float amount;                   /* gate (mix above) */
+    float threshold, ratio, attack, release, input, output;   /* compressor: dB, x, ms, ms, dB, dB */
+    int auto_bypass;
 } ds_fx_coeffs_t;
 
 typedef struct { float z1[2], z2[2]; } ds_fx_state_t;

@@ -287,9 +287,11 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     e->initialising = 0;
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
-    /* An instrument-level reverb, chorus or delay gets its buffers now (the
-     * audio thread never allocates). A GROUP-level one would be one per note,
-     * as DecentSampler runs it — too heavy here — so it stays off. */
+    /* An instrument-level reverb, chorus, delay, bit crusher, gate or
+     * compressor gets its state now (the audio thread never allocates). A
+     * GROUP-level reverb/chorus/delay would be one per note, as DecentSampler
+     * runs it — too heavy here — so it stays off; the guide says the other
+     * three do not run per note at all. */
     for (unsigned x = 0; x < e->model.effect_count; ++x) {
         const ds_effect_t *fx = &e->model.effects[x];
         int made = 1;
@@ -297,6 +299,9 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
         if (!strcmp(fx->type, "reverb")) made = (e->reverb[x] = ds_reverb_create((float)output_rate)) != NULL;
         else if (!strcmp(fx->type, "chorus")) made = (e->chorus[x] = ds_chorus_create((float)output_rate)) != NULL;
         else if (!strcmp(fx->type, "delay")) made = (e->delay[x] = ds_delay_create((float)output_rate, longest_delay(&e->model, x))) != NULL;
+        else if (!strcmp(fx->type, "bit_crusher")) made = (e->crusher[x] = ds_bitcrusher_create((float)output_rate)) != NULL;
+        else if (!strcmp(fx->type, "gate")) made = (e->gate[x] = ds_gate_create((float)output_rate)) != NULL;
+        else if (!strcmp(fx->type, "compressor")) made = (e->compressor[x] = ds_compressor_create((float)output_rate)) != NULL;
         if (!made) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
     }
     for (unsigned k = 0; k < e->model.modulator_count; ++k) {
@@ -332,6 +337,9 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
         ds_reverb_destroy(e->reverb[x]);
         ds_chorus_destroy(e->chorus[x]);
         ds_delay_destroy(e->delay[x]);
+        ds_bitcrusher_destroy(e->crusher[x]);
+        ds_gate_destroy(e->gate[x]);
+        ds_compressor_destroy(e->compressor[x]);
     }
     free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt); free(e->xf_scratch);
     ds_preset_model_free(&e->model);
@@ -450,7 +458,10 @@ static const char *effect_attribute(const char *token) {
         {"FX_REVERB_DAMPING", "damping"}, {"FX_DELAY_TIME", "delayTime"}, {"FX_FEEDBACK", "feedback"},
         {"FX_WET_LEVEL", "wetLevel"}, {"FX_MIX", "mix"}, {"FX_MOD_RATE", "modRate"}, {"FX_MOD_DEPTH", "modDepth"},
         {"FX_STEREO_OFFSET", "stereoOffset"}, {"FX_DRIVE", "drive"}, {"FX_OUTPUT_LEVEL", "outputLevel"},
-        {"FX_BIT_DEPTH", "bitDepth"}, {"FX_DOWNSAMPLE_FACTOR", "downsampleFactor"}};
+        {"FX_BIT_DEPTH", "bitDepth"}, {"FX_DOWNSAMPLE_FACTOR", "downsampleFactor"},
+        {"FX_SAMPLE_RATE_REDUCTION", "sampleRateReduction"}, {"FX_GATE_AMOUNT", "amount"}, {"FX_THRESHOLD", "threshold"},
+        {"FX_RATIO", "ratio"}, {"FX_ATTACK", "attack"}, {"FX_RELEASE", "release"}, {"FX_INPUT_GAIN", "inputGain"},
+        {"FX_OUTPUT_GAIN", "outputGain"}, {"FX_SHAPE", "shape"}, {"FX_DRIVE_BOOST", "driveBoost"}};
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); ++i) if (!strcmp(token, map[i].token)) return map[i].attr;
     return NULL;
 }
@@ -1306,6 +1317,15 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
             if (e->chorus[x]) { ds_chorus_set(e->chorus[x], c->mix, c->depth, c->rate); ds_chorus_process(e->chorus[x], out_lr, frames); }
         } else if (c->kind == DS_FX_DELAY) {
             if (e->delay[x]) { ds_delay_set(e->delay[x], c->time, c->offset, c->feedback, c->wet); ds_delay_process(e->delay[x], out_lr, frames); }
+        } else if (c->kind == DS_FX_BITCRUSHER) {
+            if (e->crusher[x]) { ds_bitcrusher_set(e->crusher[x], c->bits, c->reduction, c->mix); ds_bitcrusher_process(e->crusher[x], out_lr, frames); }
+        } else if (c->kind == DS_FX_GATE) {
+            if (e->gate[x]) { ds_gate_set(e->gate[x], c->amount, c->mix); ds_gate_process(e->gate[x], out_lr, frames); }
+        } else if (c->kind == DS_FX_COMPRESSOR) {
+            if (e->compressor[x]) {
+                ds_compressor_set(e->compressor[x], c->threshold, c->ratio, c->attack, c->release, c->input, c->output, c->auto_bypass);
+                ds_compressor_process(e->compressor[x], out_lr, frames);
+            }
         } else {
             ds_fx_process(c, &e->fx_state[x], out_lr, frames);
         }

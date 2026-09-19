@@ -15,6 +15,10 @@ float ds_fx_default(const char *type, const char *name) {
         {"chorus", "mix", 0.5f}, {"chorus", "modDepth", 0.2f}, {"chorus", "modRate", 0.2f},
         {"delay", "delayTime", 0.7f}, {"delay", "stereoOffset", 0}, {"delay", "feedback", 0.2f},
         {"delay", "wetLevel", 0.5f}, {"gain", "level", 0},
+        {"bit_crusher", "bitDepth", 24}, {"bit_crusher", "sampleRateReduction", 1}, {"bit_crusher", "mix", 1},
+        {"gate", "amount", 0.5f}, {"gate", "mix", 1},
+        {"compressor", "threshold", -12}, {"compressor", "ratio", 4}, {"compressor", "attack", 5},
+        {"compressor", "release", 100}, {"compressor", "inputGain", 0}, {"compressor", "outputGain", 0},
         {"peak", "frequency", 10000}, {"notch", "frequency", 10000}, {NULL, "frequency", 22000},
         {NULL, "resonance", 0.7f}, {NULL, "q", 0.7f}, {NULL, "gain", 1}};
     for (unsigned i = 0; i < sizeof(defaults) / sizeof(defaults[0]); ++i)
@@ -69,6 +73,30 @@ void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
         c->feedback = clampf(setting(fx, "feedback"), 0, 1);
         c->wet = clampf(setting(fx, "wetLevel"), 0, 1);
         c->kind = DS_FX_DELAY;
+        return;
+    }
+    if (!strcmp(t, "bit_crusher")) {
+        c->bits = clampf(setting(fx, "bitDepth"), 1, 24);
+        c->reduction = clampf(setting(fx, "sampleRateReduction"), 1, 32);
+        c->mix = clampf(setting(fx, "mix"), 0, 1);
+        c->kind = DS_FX_BITCRUSHER;
+        return;
+    }
+    if (!strcmp(t, "gate")) {
+        c->amount = clampf(setting(fx, "amount"), 0, 1);
+        c->mix = clampf(setting(fx, "mix"), 0, 1);
+        c->kind = DS_FX_GATE;
+        return;
+    }
+    if (!strcmp(t, "compressor")) {
+        c->threshold = clampf(setting(fx, "threshold"), -60, 0);
+        c->ratio = clampf(setting(fx, "ratio"), 1, 20);
+        c->attack = clampf(setting(fx, "attack"), 0.1f, 200);
+        c->release = clampf(setting(fx, "release"), 5, 2000);
+        c->input = clampf(setting(fx, "inputGain"), -24, 24);
+        c->output = clampf(setting(fx, "outputGain"), -24, 24);
+        c->auto_bypass = ds_fx_param(fx, "autoBypass", 0) > 0.5f;
+        c->kind = DS_FX_COMPRESSOR;
         return;
     }
     if (!strcmp(t, "lowpass_1pl")) {

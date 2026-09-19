@@ -10,6 +10,9 @@
 #include "reverb.h"
 #include "chorus.h"
 #include "delay.h"
+#include "bitcrusher.h"
+#include "gate.h"
+#include "compressor.h"
 #include "preset_model.h"
 #include "wav_source.h"
 
@@ -161,6 +164,9 @@ typedef struct {
     ds_reverb_t *reverb[DS_MAX_EFFECTS];  /* instrument-level reverbs, made at load */
     ds_chorus_t *chorus[DS_MAX_EFFECTS];  /* instrument-level choruses, made at load */
     ds_delay_t *delay[DS_MAX_EFFECTS];    /* instrument-level delays, made at load */
+    ds_bitcrusher_t *crusher[DS_MAX_EFFECTS];
+    ds_gate_t *gate[DS_MAX_EFFECTS];
+    ds_compressor_t *compressor[DS_MAX_EFFECTS];
     /* Modulators: shared state for global ones, their value this block, the
      * last value of every CC (for <midiCC>), keys held (a global envelope
      * gates on the first key down and the last key up), and which effects any

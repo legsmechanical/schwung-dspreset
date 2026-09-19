@@ -464,6 +464,10 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "levelLinear");
                 fx->param_values[fx->param_count++] = 1;
             }
+            if (attr(a, end, "autoBypass", text, sizeof(text)) && !strcasecmp(text, "true")) {
+                snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "autoBypass");
+                fx->param_values[fx->param_count++] = 1;
+            }
             if (attr(a, end, "delayTimeFormat", text, sizeof(text)) && !strcasecmp(text, "musical_time")) {
                 snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "musicalTime");
                 fx->param_values[fx->param_count++] = 1;

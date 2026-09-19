@@ -253,10 +253,23 @@ the module needs a host at least that new; set `min_host_version` to 0.7.13 when
 in a catalog. It is read on the WORKER (the host's fallback chain may read a settings file
 once) and handed to the engine per block. `tests/test_support.h` mirrors that struct.
 
+## Bit crusher, gate, compressor
+
+Our own (`bitcrusher.c`, `gate.c`, `compressor.c`): DecentSampler documents what they do, not
+its formulas. Instrument level only — the guide's list of per-note effects does not include
+them. Crusher: hold every Nth sample, round to 2^(bits−1) steps, linear mix; 24 bits skip the
+rounding (it would only disturb a float). Gate: exact 50 ms windows, `u < amount` shuts one, 5 ms
+linear fades, a FIXED seed (`DS_GATE_SEED`: the same pattern every load). Compressor: a peak
+follower on the louder channel (stereo-linked) after the input gain, `(level/thr)^(1/ratio − 1)`
+above the threshold; autoBypass fades the whole effect (50 ms) while under the threshold. Ratio 1
+and 0 dB gains are exactly transparent. A sine reads ~0.6 dB less reduction than the static
+curve: the follower rides below its peaks (the test measures the curve on a steady level).
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
-delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
+delay, convolution, pitch shift, wave shaper/folder, stereo simulator, group-level reverb /
+chorus / delay.
 Also: envelope curve shapes, FLAC samples, musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 

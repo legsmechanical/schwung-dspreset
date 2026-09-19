@@ -14,3 +14,6 @@ src/dsp/dspreset/effects.c
 src/dsp/dspreset/reverb.c
 src/dsp/dspreset/chorus.c
 src/dsp/dspreset/delay.c
+src/dsp/dspreset/bitcrusher.c
+src/dsp/dspreset/gate.c
+src/dsp/dspreset/compressor.c
