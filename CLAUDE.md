@@ -206,11 +206,24 @@ over the last N frames before the loop end, the audio N frames before the loop s
 the head path mixes it on the audio thread, the worker pre-mixes it into the ring. N is clamped
 to the audio before the loop start, so a loop from frame 0 (CS-20M, DS The Synths) is unchanged.
 
+## Controls naming controls
+
+An `<xyPad>` is TWO knobs (X then Y, each with its `<x>`/`<y>` bindings); an axis nothing is
+bound to is dropped and the other keeps the pad's name ("LowpassXY" → "Lowpass"). A binding
+names a control by DecentSampler's index (`ds_index`: a pad's axes share one; plain VALUE is
+X), by `parameterName` (any mixed-case `parameter` on `type="control"` — BassForge's CC maps),
+or by `controlTags`. A linear binding onto a control with NO output range spans the control's
+range. ⚠ Whether DecentSampler counts labels/images in `position` is undocumented ("note 1"
+is missing from the guide copy): we count only knobs, buttons, menus and pads, as before.
+`modulatorTags`, `sampleTags` (level sample: volume, tuning, pan, enabled per sample),
+binding `enabled="false"`, and `triggerOnLoad="false"` (held back while `initialising`: the
+load's control pass and the plugin's restore loop) are honoured.
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
 delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
-Also: xy-pads, per-sample-tag bindings, envelope curve shapes, FLAC samples, legato/first triggers,
+Also: envelope curve shapes, FLAC samples, legato/first triggers,
 musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 

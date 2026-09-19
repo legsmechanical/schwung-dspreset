@@ -233,6 +233,7 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
     if (restoring) {
         /* A restored project: put its controls back before anyone hears it. */
         const char *q = in->restore_controls;
+        next->initialising = 1;                  /* a restore is a load: triggerOnLoad="false" waits */
         for (unsigned i = 0; i < next->model.control_count && *q; ++i) {
             char *tail;
             float v = strtof(q, &tail);
@@ -241,6 +242,7 @@ static int load_target(dspreset_instance_t *in, const char *path, uint32_t gen) 
             if (!q) break;
             ++q;
         }
+        next->initialising = 0;
         in->restore_path[0] = '\0';
     }
     atomic_store(&in->ctl_dirty, 0);

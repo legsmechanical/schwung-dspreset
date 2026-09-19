@@ -267,6 +267,8 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     for (unsigned i = 0; i < e->zone_count; ++i) {
         e->zones[i].tag_mask = ds_preset_model_tag_mask(&e->model, e->zones[i].def.tags);
         e->zones[i].silenced_by = ds_preset_model_tag_mask(&e->model, e->zones[i].def.silenced_by);
+        e->zones[i].live_volume = 1.0f;
+        e->zones[i].live_enabled = 1;
         if (e->zones[i].def.group_index >= (int)e->model.group_count) { e->zones[i].source = -1; }
     }
     for (unsigned t = 0; t < DS_MAX_TAGS; ++t) {
@@ -276,7 +278,9 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     }
     /* Controls start at the preset's values, and fire (DecentSampler's
      * triggerOnLoad default) so the sound matches what the preset shows. */
+    e->initialising = 1;
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
+    e->initialising = 0;
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
     /* An instrument-level reverb, chorus or delay gets its buffers now (the
      * audio thread never allocates). A GROUP-level one would be one per note,
@@ -359,7 +363,7 @@ static int pick_key(const ds_zone_t *z, const ds_group_settings_t *g, const ds_g
 
 static int zone_enabled(const ds_native_engine_t *e, const ds_zone_t *z) {
     uint64_t tags = z->tag_mask;
-    if (!e->groups_rt[z->def.group_index].enabled) return 0;
+    if (!z->live_enabled || !e->groups_rt[z->def.group_index].enabled) return 0;
     for (unsigned t = 0; tags; ++t, tags >>= 1) if ((tags & 1) && !e->tag_enabled[t]) return 0;
     return 1;
 }
@@ -372,8 +376,9 @@ static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const
     uint64_t tags = z->tag_mask;
     out->gain = d->own_volume * g->volume * in->volume;
     for (unsigned t = 0; tags; ++t, tags >>= 1) if (tags & 1) out->gain *= e->tag_volume[t];
-    out->tuning = d->base_tuning + g->tuning + in->tuning;
-    out->pan = (d->own_mask & DS_OWN_PAN) ? d->pan : g->has_pan ? g->pan : in->pan;
+    out->gain *= z->live_volume;
+    out->tuning = d->base_tuning + g->tuning + in->tuning + z->live_tuning;
+    out->pan = z->live_has_pan ? z->live_pan : (d->own_mask & DS_OWN_PAN) ? d->pan : g->has_pan ? g->pan : in->pan;
     out->vel_track = (d->own_mask & DS_OWN_VEL_TRACK) ? d->amp_vel_track : g->has_vel_track ? g->vel_track : in->vel_track;
     for (int i = 0; i < 4; ++i)
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
@@ -463,18 +468,44 @@ static void set_modulator_value(ds_modulator_t *m, const char *token, float v) {
 
 static void control_changed(ds_native_engine_t *e, unsigned index, float value, int depth);
 
+/* A binding onto another control. With no output range of its own, a plain
+ * linear one spans the target's range (BassForge's CC maps give none: taken
+ * literally, any CC above 1 would pin the knob at its top). */
+static void drive_control(ds_native_engine_t *e, const ds_binding_t *b, unsigned index, float in_min, float in_max,
+                          float value, float translated, int depth) {
+    const ds_control_t *c = &e->model.controls[index];
+    float v = translated;
+    if (b->translation == DS_TRANSLATE_LINEAR && !b->has_range && !b->has_factor && !b->reversed && in_max > in_min) {
+        float t = (value - in_min) / (in_max - in_min);
+        v = c->min + (t < 0 ? 0 : t > 1 ? 1 : t) * (c->max - c->min);
+    }
+    control_changed(e, index, v, depth + 1);
+}
+
 static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in_min, float in_max, float value, int depth) {
-    float v = ds_binding_translate(b, in_min, in_max, value);
+    float v;
+    if (b->disabled || (e->initialising && !b->trigger_on_load)) return;
+    v = ds_binding_translate(b, in_min, in_max, value);
     switch (b->target) {
     case DS_TARGET_NONE: return;
     case DS_TARGET_CONTROL_VALUE:
-        if (depth < 2 && b->position >= 0 && b->position < (int)e->model.control_count) control_changed(e, (unsigned)b->position, v, depth + 1);
+        if (depth >= 2) return;
+        if (b->tag_mask) {
+            for (unsigned i = 0; i < e->model.control_count; ++i)
+                if (e->model.controls[i].tag_mask & b->tag_mask) drive_control(e, b, i, in_min, in_max, value, v, depth);
+        } else if (b->position >= 0 && b->position < (int)e->model.control_count) {
+            drive_control(e, b, (unsigned)b->position, in_min, in_max, value, v, depth);
+        }
         return;
-    case DS_TARGET_MODULATOR: {
-        int m = b->position < 0 ? 0 : b->position;
-        if (m < (int)e->model.modulator_count) set_modulator_value(&e->model.modulators[m], b->name, v);
+    case DS_TARGET_MODULATOR:
+        if (b->tag_mask) {
+            for (unsigned i = 0; i < e->model.modulator_count; ++i)
+                if (e->model.modulators[i].tag_mask & b->tag_mask) set_modulator_value(&e->model.modulators[i], b->name, v);
+        } else {
+            int m = b->position < 0 ? 0 : b->position;
+            if (m < (int)e->model.modulator_count) set_modulator_value(&e->model.modulators[m], b->name, v);
+        }
         return;
-    }
     case DS_TARGET_EFFECT:
         for (unsigned i = 0; i < e->model.effect_count; ++i)
             if (b->tag_mask ? (e->model.effects[i].tag_mask & b->tag_mask) != 0 : (int)i == b->effect) {
@@ -484,7 +515,16 @@ static void apply_binding(ds_native_engine_t *e, const ds_binding_t *b, float in
         return;
     default: break;
     }
-    if (b->level == DS_LEVEL_TAG) {
+    if (b->level == DS_LEVEL_SAMPLE) {
+        for (unsigned i = 0; i < e->zone_count; ++i) {
+            ds_zone_t *z = &e->zones[i];
+            if (!(z->tag_mask & b->tag_mask)) continue;
+            if (b->target == DS_TARGET_VOLUME) z->live_volume = v < 0 ? 0 : v;
+            else if (b->target == DS_TARGET_TUNING) z->live_tuning = v;
+            else if (b->target == DS_TARGET_PAN) { z->live_pan = v / 100.0f; z->live_has_pan = 1; }
+            else if (b->target == DS_TARGET_ENABLED) z->live_enabled = v >= 0.5f;
+        }
+    } else if (b->level == DS_LEVEL_TAG) {
         for (unsigned t = 0; t < e->model.tag_count; ++t) {
             if (!(b->tag_mask & (1ull << t))) continue;
             if (b->target == DS_TARGET_VOLUME) e->tag_volume[t] = v < 0 ? 0 : v;

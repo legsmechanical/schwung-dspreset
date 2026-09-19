@@ -104,7 +104,14 @@ float ds_binding_translate(const ds_binding_t *b, float in_min, float in_max, fl
 static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(type, "effect")) return DS_TARGET_EFFECT;
     if (!strcmp(type, "modulator")) return DS_TARGET_MODULATOR;
-    if (!strcmp(param, "VALUE") && (!strcmp(level, "ui") || !strcmp(type, "control"))) return DS_TARGET_CONTROL_VALUE;
+    if ((!strcmp(param, "VALUE") || !strcmp(param, "X_VALUE") || !strcmp(param, "Y_VALUE")) &&
+        (!strcmp(level, "ui") || !strcmp(type, "control"))) return DS_TARGET_CONTROL_VALUE;
+    if (!strcmp(type, "control")) {
+        /* A control named by its parameterName (mixed case: DS's own tokens
+         * are capitals); the other UI properties (text, visibility) have no sound. */
+        for (const char *c = param; *c; ++c) if (islower((unsigned char)*c)) return DS_TARGET_CONTROL_VALUE;
+        return DS_TARGET_NONE;
+    }
     if (!strcmp(param, "AMP_VOLUME") || !strcmp(param, "TAG_VOLUME")) return DS_TARGET_VOLUME;
     if (!strcmp(param, "GLOBAL_TUNING") || !strcmp(param, "GROUP_TUNING") || !strcmp(param, "TUNING")) return DS_TARGET_TUNING;
     if (!strcmp(param, "PAN")) return DS_TARGET_PAN;
@@ -142,7 +149,12 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     snprintf(b->name, sizeof(b->name), "%s", param);
     b->target = target_for(type, level, param);
     b->level = !strcmp(level, "group") ? DS_LEVEL_GROUP : !strcmp(level, "tag") ? DS_LEVEL_TAG :
-               !strcmp(level, "ui") ? DS_LEVEL_UI : !strcmp(level, "instrument") || !level[0] ? DS_LEVEL_INSTRUMENT : DS_LEVEL_OTHER;
+               !strcmp(level, "ui") ? DS_LEVEL_UI : !strcmp(level, "sample") ? DS_LEVEL_SAMPLE :
+               !strcmp(level, "instrument") || !level[0] ? DS_LEVEL_INSTRUMENT : DS_LEVEL_OTHER;
+    b->axis = !strcmp(param, "X_VALUE") ? 0 : !strcmp(param, "Y_VALUE") ? 1 : -1;
+    b->by_name = b->target == DS_TARGET_CONTROL_VALUE && strcmp(param, "VALUE") && b->axis < 0;
+    b->trigger_on_load = !(attr(a, e, "triggerOnLoad", text, sizeof(text)) && !strcasecmp(text, "false"));
+    b->disabled = attr(a, e, "enabled", text, sizeof(text)) && (!strcasecmp(text, "false") || !strcmp(text, "0"));
     b->position = -1;
     if (attr_num(a, e, "position", &f) || attr_num(a, e, "groupIndex", &f) || attr_num(a, e, "effectIndex", &f) ||
         attr_num(a, e, "controlIndex", &f)) b->position = (int)f;
@@ -157,6 +169,12 @@ static void parse_binding(ds_preset_model_t *m, const char *a, const char *e, ds
     if (b->level == DS_LEVEL_TAG) {
         if (attr(a, e, "identifier", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text)))
             b->tag_mask = ds_preset_model_tag_mask(m, text);
+    } else if (b->target == DS_TARGET_CONTROL_VALUE) {
+        if (attr(a, e, "controlTags", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text))) b->tag_mask = ds_preset_model_tag_mask(m, text);
+    } else if (b->target == DS_TARGET_MODULATOR) {
+        if (attr(a, e, "modulatorTags", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text))) b->tag_mask = ds_preset_model_tag_mask(m, text);
+    } else if (b->level == DS_LEVEL_SAMPLE) {
+        if (attr(a, e, "sampleTags", text, sizeof(text)) || attr(a, e, "tags", text, sizeof(text))) b->tag_mask = ds_preset_model_tag_mask(m, text);
     } else if (attr(a, e, "groupTags", text, sizeof(text)) || attr(a, e, "effectTags", text, sizeof(text)) ||
                attr(a, e, "tags", text, sizeof(text))) {
         b->tag_mask = ds_preset_model_tag_mask(m, text);
@@ -296,7 +314,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
     long length;
     char *xml, *p, *w;
     int in_ui = 0, in_midi = 0, in_mod = 0, in_effects = 0, in_group = 0;
-    int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1;
+    int ctrl = -1, choice = -1, cc = -1, group = -1, modulator = -1, pad = -1, ui_count = 0;
     memset(m, 0, sizeof(*m));
     group_settings(&m->instrument, NULL, NULL, 1);
     for (unsigned t = 0; t < DS_MAX_TAGS; ++t) { m->tag_volume[t] = 1; m->tag_enabled[t] = 1; m->tag_polyphony[t] = -1; }
@@ -348,6 +366,7 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
             memset(mod, 0, sizeof(*mod));
             mod->kind = tag_is(tag, "lfo") ? DS_MOD_LFO : tag_is(tag, "envelope") ? DS_MOD_ENVELOPE :
                         tag_is(tag, "midiCC") ? DS_MOD_CC : DS_MOD_VELOCITY;
+            { char tags[256]; if (attr(a, end, "tags", tags, sizeof(tags))) mod->tag_mask = ds_preset_model_tag_mask(m, tags); }
             /* scope: LFOs default to one shared instance, the rest to one per note */
             mod->voice_scope = mod->kind != DS_MOD_LFO;
             if (attr(a, end, "scope", text, sizeof(text))) mod->voice_scope = !strcmp(text, "voice");
@@ -427,6 +446,45 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
         }
         if (in_ui) {
             int knob = tag_is(tag, "labeled-knob") || tag_is(tag, "control");
+            if (tag_is(tag, "xyPad")) {
+                /* Two knobs, X then Y, each with the bindings of its <x> / <y>. */
+                if (closing || self_closing) { pad = -1; ctrl = -1; if (!self_closing) continue; }
+                if (m->control_count + 2 <= DS_MAX_CONTROLS) {
+                    char text[64] = "", base[32];
+                    float v;
+                    size_t n;
+                    if (!(attr(a, end, "label", text, sizeof(text)) && text[0])) attr(a, end, "parameterName", text, sizeof(text));
+                    snprintf(base, sizeof(base), "%.24s", text);
+                    n = strlen(base);                                   /* "LowpassXY" -> "Lowpass" */
+                    if (n > 2 && !strcasecmp(base + n - 2, "xy")) base[n -= 2] = '\0';
+                    while (n && base[n - 1] == ' ') base[--n] = '\0';
+                    for (int axis = 0; axis < 2; ++axis) {
+                        ds_control_t *c = &m->controls[m->control_count + axis];
+                        memset(c, 0, sizeof(*c));
+                        c->kind = DS_CONTROL_KNOB;
+                        c->min = 0; c->max = 1;
+                        c->def = attr_num(a, end, axis ? "yValue" : "xValue", &v) ? v : 0;
+                        if (base[0]) snprintf(c->name, sizeof(c->name), "%s %c", base, axis ? 'Y' : 'X');
+                        attr(a, end, "parameterName", c->param_name, sizeof(c->param_name));
+                        { char tags[256]; if (attr(a, end, "tags", tags, sizeof(tags))) c->tag_mask = ds_preset_model_tag_mask(m, tags); }
+                        c->ds_index = ui_count;
+                        c->xy_axis = axis;
+                        c->first_binding = m->binding_count;
+                        c->first_choice = m->choice_count;
+                    }
+                    pad = self_closing ? -1 : (int)m->control_count;
+                    m->control_count += 2;
+                }
+                ui_count++;
+                ctrl = -1;
+                continue;
+            }
+            if (pad >= 0 && (tag_is(tag, "x") || tag_is(tag, "y"))) {
+                if (closing || self_closing) { ctrl = -1; continue; }
+                ctrl = pad + (tag_is(tag, "y") ? 1 : 0);
+                m->controls[ctrl].first_binding = m->binding_count;
+                continue;
+            }
             if ((knob || tag_is(tag, "button") || tag_is(tag, "menu")) && closing) { ctrl = -1; continue; }
             if ((knob || tag_is(tag, "button") || tag_is(tag, "menu")) && m->control_count < DS_MAX_CONTROLS) {
                 ds_control_t *c = &m->controls[m->control_count];
@@ -437,6 +495,10 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 if ((attr(a, end, "label", text, sizeof(text)) && text[0]) ||
                     (attr(a, end, "parameterName", text, sizeof(text)) && text[0]))
                     snprintf(c->name, sizeof(c->name), "%.31s", text);
+                attr(a, end, "parameterName", c->param_name, sizeof(c->param_name));
+                { char tags[256]; if (attr(a, end, "tags", tags, sizeof(tags))) c->tag_mask = ds_preset_model_tag_mask(m, tags); }
+                c->ds_index = ui_count++;
+                c->xy_axis = -1;
                 c->min = attr_num(a, end, "minValue", &v) ? v : 0;
                 c->max = attr_num(a, end, "maxValue", &v) ? v : 1;
                 c->def = attr_num(a, end, "value", &v) ? v : c->min;
@@ -487,6 +549,38 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
         }
     }
     free(xml);
+    /* A pad axis nothing is bound to is no knob (BassForge's filter pads move
+     * only Y): the other axis keeps the pad's plain name. */
+    for (unsigned i = 0; i < m->control_count; ) {
+        ds_control_t *c = &m->controls[i];
+        if (c->xy_axis >= 0 && !c->binding_count) {
+            int partner = c->xy_axis ? (int)i - 1 : (int)i + 1;
+            if (partner >= 0 && partner < (int)m->control_count && m->controls[partner].xy_axis >= 0 &&
+                m->controls[partner].ds_index == c->ds_index && m->controls[partner].binding_count) {
+                char *name = m->controls[partner].name;
+                size_t n = strlen(name);
+                if (n > 2 && name[n - 2] == ' ') name[n - 2] = '\0';
+                memmove(c, c + 1, (m->control_count - i - 1) * sizeof(*c));
+                m->control_count--;
+                continue;
+            }
+        }
+        ++i;
+    }
+    /* Controls a binding names: by DecentSampler's index (a pad's axes share
+     * one; VALUE is its X), or by parameterName. */
+    for (unsigned i = 0; i < m->binding_count; ++i) {
+        ds_binding_t *b = &m->bindings[i];
+        int found = -1;
+        if (b->target != DS_TARGET_CONTROL_VALUE || b->tag_mask) continue;
+        for (unsigned k = 0; k < m->control_count && found < 0; ++k) {
+            const ds_control_t *c = &m->controls[k];
+            int hit = b->by_name ? (c->param_name[0] && !strcmp(c->param_name, b->name)) : c->ds_index == b->position;
+            if (hit && (c->xy_axis < 0 || b->axis < 0 || c->xy_axis == b->axis)) found = (int)k;
+        }
+        if (found < 0) b->target = DS_TARGET_NONE;
+        else b->position = found;
+    }
     for (unsigned i = 0; i < m->binding_count; ++i) {
         ds_binding_t *b = &m->bindings[i];
         int k = 0;

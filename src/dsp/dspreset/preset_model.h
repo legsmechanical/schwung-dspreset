@@ -17,7 +17,7 @@
 #define DS_MAX_MODULATORS 16
 
 enum { DS_CONTROL_KNOB = 0, DS_CONTROL_BUTTON, DS_CONTROL_MENU };
-enum { DS_LEVEL_INSTRUMENT = 0, DS_LEVEL_GROUP, DS_LEVEL_TAG, DS_LEVEL_UI, DS_LEVEL_OTHER };
+enum { DS_LEVEL_INSTRUMENT = 0, DS_LEVEL_GROUP, DS_LEVEL_TAG, DS_LEVEL_UI, DS_LEVEL_SAMPLE, DS_LEVEL_OTHER };
 enum { DS_TRANSLATE_LINEAR = 0, DS_TRANSLATE_TABLE, DS_TRANSLATE_FIXED };
 enum {
     DS_TARGET_NONE = 0,
@@ -57,6 +57,11 @@ typedef struct {
     float table_in[DS_MAX_TABLE], table_out[DS_MAX_TABLE];   /* Capture's cutoff table has 21 */
     float fixed;                      /* fixed_value, numeric (true = 1, "-6dB" -> linear when a volume) */
     int mod_behavior;                 /* bindings under a modulator */
+    /* type control: the control is named by its parameterName (BassForge's
+     * CC maps) rather than by index; axis 0/1 = X_VALUE/Y_VALUE of a pad */
+    int by_name, axis;
+    int trigger_on_load;              /* 0: not fired when the preset loads or a project restores */
+    int disabled;                     /* enabled="false" */
 } ds_binding_t;
 
 /* One <lfo>, <envelope>, <midiCC> or <midiVelocity>. The settings here are
@@ -66,6 +71,7 @@ typedef struct {
     float frequency, mod_amount, delay;
     float attack, decay, sustain, release;
     unsigned first_binding, binding_count;
+    uint64_t tag_mask;                /* for modulatorTags */
 } ds_modulator_t;
 
 typedef struct { char name[32]; unsigned first_binding, binding_count; } ds_choice_t;
@@ -77,6 +83,10 @@ typedef struct {
     int integer;
     unsigned first_binding, binding_count;      /* knob */
     unsigned first_choice, choice_count;        /* button states / menu options */
+    char param_name[32];              /* parameterName as written: bindings may name the control by it */
+    uint64_t tag_mask;                /* for controlTags */
+    int ds_index;                     /* DecentSampler's index for it: a pad's two axes share one */
+    int xy_axis;                      /* -1, or 0 / 1: the X or Y half of an <xyPad> */
 } ds_control_t;
 
 typedef struct { int cc; unsigned first_binding, binding_count; } ds_cc_map_t;

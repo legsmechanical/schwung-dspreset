@@ -48,6 +48,10 @@ typedef struct {
     ds_bounds_t b;
     uint64_t tag_mask;                  /* in the model's tag numbering */
     uint64_t silenced_by;               /* silencedByTags, same numbering */
+    /* level="sample" bindings (sampleTags): this sample alone, live */
+    float live_volume, live_pan;
+    double live_tuning;
+    int live_has_pan, live_enabled;
 } ds_zone_t;
 
 enum { DS_ENV_ATTACK, DS_ENV_DECAY, DS_ENV_SUSTAIN, DS_ENV_RELEASE, DS_ENV_DONE };
@@ -129,6 +133,7 @@ typedef struct {
     unsigned char tag_enabled[DS_MAX_TAGS];
     int tag_polyphony[DS_MAX_TAGS];     /* voices a tag may sound at once; -1 = no limit */
     float control_value[DS_MAX_CONTROLS];
+    int initialising;                   /* the load / restore pass: triggerOnLoad="false" bindings wait */
     /* Effects: coefficients per model effect, recomputed on the audio thread
      * when a binding moves a setting; state for the instrument-level ones. */
     ds_fx_coeffs_t fx_coeffs[DS_MAX_EFFECTS];

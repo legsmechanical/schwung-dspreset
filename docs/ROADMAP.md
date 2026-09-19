@@ -75,6 +75,8 @@ its own pages; it has one stereo output and no MPE input path.
 - 2026-09-19: items 3 (pitchKeyTrack), 4 (tag polyphony), 10 (choke groups) — built, tested.
 - 2026-09-19: item 5 (loop crossfades) and item 16's SAMPLE_START/END, LOOP_START/END, ROOT_NOTE,
   LO/HI_NOTE, LO/HI_VEL, AMP_ENV_ENABLED, GROUP_VOLUME — built, tested.
+- 2026-09-19: items 6 (XY pads), 7 (CC → control by name), 17 (controlTags / modulatorTags /
+  sampleTags), 18 (triggerOnLoad) — built, tested. BassForge's filter pads now work.
 
 ## Decision (Josh, 2026-09-19)
 
