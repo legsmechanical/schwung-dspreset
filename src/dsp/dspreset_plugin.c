@@ -19,7 +19,10 @@
 
 #define MOVE_PLUGIN_API_VERSION_2 2
 
-typedef struct host_api_v1 { uint32_t api_version; int sample_rate, frames_per_block; uint8_t *mapped_memory; int audio_out_offset, audio_in_offset; void (*log)(const char *); int (*midi_send_internal)(const uint8_t *, int); int (*midi_send_external)(const uint8_t *, int); } host_api_v1_t;
+/* The host's v1 struct as far as get_bpm, laid out as both hosts declare it
+ * (stock Schwung from 0.7.13 on, and the dbxhost fork). */
+typedef struct host_api_v1 { uint32_t api_version; int sample_rate, frames_per_block; uint8_t *mapped_memory; int audio_out_offset, audio_in_offset; void (*log)(const char *); int (*midi_send_internal)(const uint8_t *, int); int (*midi_send_external)(const uint8_t *, int);
+    int (*get_clock_status)(void); void *mod_emit_value, *mod_clear_source, *mod_host_ctx; float (*get_bpm)(void); } host_api_v1_t;
 typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(const char *, const char *); void (*destroy_instance)(void *); void (*on_midi)(void *, const uint8_t *, int, int); void (*set_param)(void *, const char *, const char *); int (*get_param)(void *, const char *, char *, int); int (*get_error)(void *, char *, int); void (*render_block)(void *, int16_t *, int); } plugin_api_v2_t;
 
 /* How long a selection must stay put before it loads. Scrolling the preset
@@ -93,6 +96,7 @@ typedef struct {
     _Atomic float gain;
     _Atomic int amp_on;                 /* the module's amp envelope: Override */
     _Atomic int polyphony;              /* notes at once; 0 = "Preset" (no module limit) */
+    _Atomic float bpm;                  /* read by the worker: the host's tempo call may touch a file once */
     _Atomic float amp_value[4];         /* seconds, seconds, 0..1, seconds */
     seqstr_t request;                   /* preset_path / state from the host */
     seqstr_t request_controls;          /* control positions from a restored state */
@@ -358,6 +362,7 @@ static void *engine_worker(void *opaque) {
                 log_line(line);
             }
         }
+        if (g_host && g_host->get_bpm) atomic_store_explicit(&in->bpm, g_host->get_bpm(), memory_order_relaxed);
         engine = atomic_load(&in->active);
         if (!engine || !ds_native_engine_service(engine)) usleep(1000);
     }
@@ -400,6 +405,10 @@ static void destroy_instance(void *opaque) {
 static void sync_amp(dspreset_instance_t *in, ds_native_engine_t *engine) {
     int on = atomic_load_explicit(&in->amp_on, memory_order_relaxed);
     engine->poly_limit = atomic_load_explicit(&in->polyphony, memory_order_relaxed);
+    {
+        float bpm = atomic_load_explicit(&in->bpm, memory_order_relaxed);
+        engine->bpm = bpm >= 20.0f ? bpm : 120.0f;
+    }
     for (int i = 0; i < 4; ++i)
         engine->amp_override[i] = on ? atomic_load_explicit(&in->amp_value[i], memory_order_relaxed) : -1.0f;
 }

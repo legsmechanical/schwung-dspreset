@@ -110,6 +110,14 @@ int ds_note_number(const char *text) {
     return (octave + 2) * 12 + pc;                                  /* C3 = 60 */
 }
 
+/* seconds / beats / samples */
+static int unit_attr(const scope_t *s, int depth, const char *name, int fallback) {
+    char text[16];
+    if (!lookup(s, depth, name, text, sizeof(text))) return fallback;
+    return !strcasecmp(text, "beats") ? DS_UNIT_BEATS : !strcasecmp(text, "samples") ? DS_UNIT_SAMPLES :
+           !strcasecmp(text, "seconds") ? DS_UNIT_SECONDS : fallback;
+}
+
 /* A note attribute: a number or a note name. */
 static int note_attr(const scope_t *s, int depth, const char *name, int fallback) {
     char text[32];
@@ -207,6 +215,12 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
     out->glide_mode = DS_GLIDE_LEGATO;
     if (lookup(s, depth, "glideMode", mode, sizeof(mode)))
         out->glide_mode = !strcasecmp(mode, "always") ? DS_GLIDE_ALWAYS : !strcasecmp(mode, "off") ? DS_GLIDE_OFF : DS_GLIDE_LEGATO;
+    out->delay = (float)number(s, depth, "delay", 0);
+    if (out->delay < 0) out->delay = 0;
+    out->delay_unit = unit_attr(s, depth, "delayUnit", DS_UNIT_SECONDS);
+    out->retrigger = boolean(s, depth, "retriggerEnabled", 0);
+    out->retrigger_interval = (float)number(s, depth, "retriggerInterval", 4.0);
+    out->retrigger_unit = unit_attr(s, depth, "retriggerIntervalUnit", DS_UNIT_BEATS);
     out->release_decay = 0;
     out->release_decay_db = 0;
     if (lookup(s, depth, "releaseTriggerDecay", text, sizeof(text))) {

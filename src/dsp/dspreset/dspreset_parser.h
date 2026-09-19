@@ -8,6 +8,7 @@
 enum { DS_SEQ_ALWAYS = 0, DS_SEQ_ROUND_ROBIN, DS_SEQ_RANDOM };
 enum { DS_TRIGGER_ATTACK = 0, DS_TRIGGER_RELEASE, DS_TRIGGER_FIRST, DS_TRIGGER_LEGATO, DS_TRIGGER_CONTINUOUS };
 enum { DS_GLIDE_OFF = 0, DS_GLIDE_ALWAYS, DS_GLIDE_LEGATO };
+enum { DS_UNIT_SECONDS = 0, DS_UNIT_BEATS, DS_UNIT_SAMPLES };
 #define DS_MAX_PREVIOUS 16
 #define DS_NO_INTERVAL (-1000)
 
@@ -42,6 +43,11 @@ typedef struct {
     int glide_mode;                 /* DS_GLIDE_* */
     float release_decay;            /* releaseTriggerDecay: dB per second held, or (linear) gain lost per second */
     int release_decay_db;
+    float delay;                    /* before the sample starts, in delay_unit */
+    int delay_unit;                 /* DS_UNIT_* */
+    int retrigger;                  /* retriggerEnabled: again every retrigger_interval while held */
+    float retrigger_interval;
+    int retrigger_unit;
 
     /* For live controls: what the <sample> element sets ITSELF, so a group- or
      * instrument-level binding can override everything else without touching

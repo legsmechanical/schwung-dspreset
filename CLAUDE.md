@@ -241,6 +241,18 @@ second held; a plain number = linear gain LOST per second (`1 − x·held`; the 
 plays; `swallowNotes` also swallows its note-off; `eventType` defaults to note_on (⚠ the guide
 says both note_on and any); `midiElementIndex` counts `<cc>`, `<note>`, `<velocity>` in order.
 
+## Start delays, retriggers, and the host's tempo
+
+`delay`/`delayUnit` (seconds, samples, beats) hold a voice silent — nothing advances — for that
+many frames, sample-exact within a block. `retriggerEnabled` repeats each zone every
+`retriggerInterval` (unit default: beats) while its key is held: the schedule lives in
+`e->retrig[]`, NOT in the voice (a short hit ends long before its next repeat), and stops at the
+key's release. "Beats" use the host's tempo: ⚠ the plugin now reads `get_bpm` from the host
+struct, which BOTH hosts declare at the same offset since stock Schwung **0.7.13** (2026-03) —
+the module needs a host at least that new; set `min_host_version` to 0.7.13 when it is listed
+in a catalog. It is read on the WORKER (the host's fallback chain may read a settings file
+once) and handed to the engine per block. `tests/test_support.h` mirrors that struct.
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced

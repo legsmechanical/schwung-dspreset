@@ -85,6 +85,8 @@ typedef struct {
     uint32_t glide_left;                /* frames of portamento still to go */
     double glide_step;                  /* semitones per frame, toward the note */
     float rt_gain;                      /* a release trigger's releaseTriggerDecay, else 1 */
+    uint32_t delay_left;                /* frames of silence before the sample starts */
+
     double pos, inc;                    /* virtual frame; frames per output frame */
     float gain_l, gain_r;
     int env_stage;
@@ -122,6 +124,13 @@ typedef struct {
      * note (-1 = none yet) and how many keys were already down. */
     int last_note, ctx_prev, ctx_keys_before;
     uint64_t frame_clock;               /* frames rendered, for how long a key was held */
+    float bpm;                          /* the host's tempo (the plugin's worker reads it), for "beats" */
+    /* retriggerEnabled: a zone repeating while its key is held. Kept apart
+     * from the voices, which may end long before the next repeat. */
+    struct { const ds_zone_t *zone; int note, velocity; uint32_t note_id, every, in; } retrig[DS_MAX_VOICES];
+    unsigned retrig_count;
+    int retriggering;                   /* start_voice is repeating a zone, not starting a note */
+    uint32_t key_note_id[128];          /* the note-on each held key belongs to */
     uint64_t note_on_frame[128];
     unsigned char swallowed[128];       /* a keyswitch kept this key from playing */
     unsigned char note_map_enabled[DS_MAX_NOTE_MAPS];

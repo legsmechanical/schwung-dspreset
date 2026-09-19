@@ -281,6 +281,7 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
     /* Controls start at the preset's values, and fire (DecentSampler's
      * triggerOnLoad default) so the sound matches what the preset shows. */
     e->last_note = -1;
+    e->bpm = 120.0f;
     for (unsigned n = 0; n < e->model.note_count; ++n) e->note_map_enabled[n] = (unsigned char)e->model.notes[n].enabled;
     e->initialising = 1;
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
@@ -768,6 +769,14 @@ static ds_voice_t *allocate_voice(ds_native_engine_t *e) {
 
 static void make_way(ds_native_engine_t *e, const ds_zone_t *z);
 
+/* A time in seconds, beats (at the host's tempo) or samples, as frames. */
+static uint32_t frames_of(const ds_native_engine_t *e, float value, int unit) {
+    double f = unit == DS_UNIT_SAMPLES ? value :
+               unit == DS_UNIT_BEATS ? value * 60.0 / (e->bpm >= 20 ? e->bpm : 120.0) * e->output_rate :
+               (double)value * e->output_rate;
+    return f <= 0 ? 0 : f > 4e9 ? 4000000000u : (uint32_t)floor(f + 0.5);
+}
+
 static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int one_shot) {
     ds_voice_t *v;
     make_way(e, z);
@@ -821,6 +830,20 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
         double frames = floor(now.glide_time * e->output_rate + 0.5);
         v->glide_left = frames < 1 ? 1 : (uint32_t)frames;
         v->glide_step = -((double)(e->ctx_prev - note) * now.key_track) / (double)v->glide_left;
+    }
+    /* a start delay, and a retrigger pattern while the key is held */
+    v->delay_left = frames_of(e, d->delay, d->delay_unit);
+    if (d->retrigger && !one_shot && !e->retriggering && e->retrig_count < DS_MAX_VOICES) {
+        uint32_t every = frames_of(e, d->retrigger_interval, d->retrigger_unit);
+        if (every) {
+            e->retrig[e->retrig_count].zone = z;
+            e->retrig[e->retrig_count].note = note;
+            e->retrig[e->retrig_count].velocity = velocity;
+            e->retrig[e->retrig_count].note_id = e->note_counter;
+            e->retrig[e->retrig_count].every = every;
+            e->retrig[e->retrig_count].in = v->delay_left + every;
+            e->retrig_count++;
+        }
     }
     /* a release trigger quieter the longer its key was held */
     v->rt_gain = 1.0f;
@@ -1019,6 +1042,7 @@ void ds_native_engine_note_on(ds_native_engine_t *e, int note, int velocity) {
     e->ctx_prev = e->last_note;
     e->ctx_keys_before = (int)e->keys_held - (e->note_velocity[note] ? 1 : 0);
     e->note_on_frame[note] = e->frame_clock;
+    e->key_note_id[note] = e->note_counter + 1;               /* the id this note-on is about to take */
     if (!e->note_velocity[note] && e->keys_held++ == 0)     /* a global envelope starts with the first key */
         for (unsigned k = 0; k < e->model.modulator_count; ++k)
             if (!e->model.modulators[k].voice_scope && e->model.modulators[k].kind == DS_MOD_ENVELOPE)
@@ -1113,6 +1137,7 @@ static inline int fetch(const ds_voice_t *v, uint64_t vf, uint32_t produced, flo
 static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsigned frames, const zone_now_t *settings) {
     uint32_t produced = packed_produced(atomic_load_explicit(&v->stream, memory_order_acquire));
     double inc, glide_ratio = 1.0;
+    unsigned first;
     {   /* volume, pan and pitch follow the controls (and modulators) while the note sounds */
         zone_now_t now = *settings;
         float gain;
@@ -1139,7 +1164,12 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         glide_ratio = pow(2.0, v->glide_step / 12.0);
         inc *= pow(2.0, -v->glide_step * v->glide_left / 12.0);
     }
-    for (unsigned i = 0; i < frames; ++i) {
+    {   /* a start delay: silent, and nothing moves, until it runs out */
+        unsigned wait = v->delay_left < frames ? v->delay_left : frames;
+        v->delay_left -= wait;
+        first = wait;
+    }
+    for (unsigned i = first; i < frames; ++i) {
         uint64_t v0 = (uint64_t)v->pos;
         float frac = (float)(v->pos - (double)v0), l0, r0, l1, r1, level;
         if (!v->b.loop && v0 >= v->b.end) { v->active = 0; break; }
@@ -1188,6 +1218,29 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
         if (m->voice_scope) continue;
         e->mod_global_value[k] = mod_value(e, m, &e->mod_global[k], 0);
         mod_advance(m, &e->mod_global[k], frames, (float)e->output_rate, &e->mod_rng[k]);
+    }
+    for (unsigned r = 0; r < e->retrig_count; ) {           /* retriggers due in this block */
+        int note = e->retrig[r].note;
+        if (!e->note_velocity[note] || e->key_note_id[note] != e->retrig[r].note_id) {   /* its key is up: the pattern stops */
+            e->retrig[r] = e->retrig[--e->retrig_count];
+            continue;
+        }
+        while (e->retrig[r].in < frames) {
+            int prev = e->ctx_prev, keys = e->ctx_keys_before;
+            uint32_t at = e->retrig[r].in, id = e->note_counter;
+            e->ctx_prev = -1; e->ctx_keys_before = 0;      /* a repeat, not a new note: no glide */
+            e->retriggering = 1;
+            e->note_counter = e->retrig[r].note_id;        /* its note's own voice, for chokes and limits */
+            start_voice(e, e->retrig[r].zone, note, e->retrig[r].velocity, 0);
+            e->note_counter = id;
+            e->retriggering = 0;
+            e->ctx_prev = prev; e->ctx_keys_before = keys;
+            for (int i = 0; i < DS_MAX_VOICES; ++i)
+                if (e->voices[i].active && e->voices[i].age == e->age_counter) e->voices[i].delay_left = at;   /* the zone's own delay was the pattern's first */
+            e->retrig[r].in = at + e->retrig[r].every;
+        }
+        e->retrig[r].in -= frames;
+        ++r;
     }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         ds_voice_t *v = &e->voices[i];

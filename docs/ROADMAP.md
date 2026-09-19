@@ -82,6 +82,8 @@ its own pages; it has one stereo output and no MPE input path.
   first survey) — built, tested.
 - 2026-09-19: items 11 (keyswitches), 12 (first / legato / continuous, previousNotes,
   legatoInterval, note names), 13 (glide), 14 (releaseTriggerDecay) — built, tested.
+- 2026-09-19: item 19 (start delay in seconds / samples / beats at the host's tempo; retrigger
+  patterns) — built, tested. Needs a host with `get_bpm` (Schwung 0.7.13+).
 
 ## Decision (Josh, 2026-09-19)
 

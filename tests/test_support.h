@@ -111,12 +111,16 @@ static void write_text(const char *path, const char *text) {
 
 /* ---- the plugin, as the host sees it ---------------------------------- */
 
-typedef struct host_api_v1 { uint32_t api_version; int sample_rate, frames_per_block; uint8_t *mapped_memory; int audio_out_offset, audio_in_offset; void (*log)(const char *); int (*midi_send_internal)(const uint8_t *, int); int (*midi_send_external)(const uint8_t *, int); } host_api_v1_t;
+/* As both hosts declare it, as far as get_bpm (the plugin reads that far). */
+typedef struct host_api_v1 { uint32_t api_version; int sample_rate, frames_per_block; uint8_t *mapped_memory; int audio_out_offset, audio_in_offset; void (*log)(const char *); int (*midi_send_internal)(const uint8_t *, int); int (*midi_send_external)(const uint8_t *, int);
+    int (*get_clock_status)(void); void *mod_emit_value, *mod_clear_source, *mod_host_ctx; float (*get_bpm)(void); } host_api_v1_t;
 typedef struct plugin_api_v2 { uint32_t api_version; void *(*create_instance)(const char *, const char *); void (*destroy_instance)(void *); void (*on_midi)(void *, const uint8_t *, int, int); void (*set_param)(void *, const char *, const char *); int (*get_param)(void *, const char *, char *, int); int (*get_error)(void *, char *, int); void (*render_block)(void *, int16_t *, int); } plugin_api_v2_t;
 extern plugin_api_v2_t *move_plugin_init_v2(const host_api_v1_t *host);
 
 static void test_log(const char *line) { fprintf(stderr, "  [log] %s\n", line); }
-static host_api_v1_t g_test_host = {.api_version = 1, .sample_rate = 44100, .frames_per_block = 128, .log = test_log};
+static volatile float g_test_bpm = 120.0f;             /* the host's tempo, as a test sets it */
+static float test_get_bpm(void) { return g_test_bpm; }
+static host_api_v1_t g_test_host = {.api_version = 1, .sample_rate = 44100, .frames_per_block = 128, .log = test_log, .get_bpm = test_get_bpm};
 
 typedef struct {
     plugin_api_v2_t *api;
