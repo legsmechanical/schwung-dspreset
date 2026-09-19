@@ -13,7 +13,7 @@ source.
 - **Missing samples don't stop a preset loading** — the rest of it plays.
 - **`.dslibrary` packages** are unpacked on the Move the first time you pick one; a **`.dsbundle`**
   (a folder) is a bank as it is.
-- **WAV and AIFF samples.**
+- **WAV, AIFF and FLAC samples.**
 
 - **The preset's own controls** — its knobs, buttons and menus — are on the module's knobs,
   named after the preset (or after what they drive, when the preset draws its names in a
