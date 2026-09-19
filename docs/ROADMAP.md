@@ -88,6 +88,7 @@ its own pages; it has one stereo output and no MPE input path.
 - 2026-09-19: item 20 (FLAC samples, via dr_flac) — built, tested.
 - 2026-09-19: item 21 (DSLibraryInfo.xml name and presetMenu) — built, tested. **Every approved
   item (3–7, 10–22) is now built**, plus the `<random>` modulator found along the way.
+- 2026-09-19: deployed with the chorus/delay branch; Josh: "pretty good". Not merged yet.
 
 ## Decision (Josh, 2026-09-19)
 
