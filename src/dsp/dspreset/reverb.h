@@ -3,7 +3,8 @@
 
 /* DecentSampler's <effect type="reverb">: JUCE's juce::Reverb (Jezar's
  * Freeverb), which is what DecentSampler runs (confirmed by Josh 2026-09-18).
- * Ported from JUCE's juce_Reverb.h (ISC licence; notice in THIRD_PARTY.md):
+ * Ported from juce_Reverb.h as released in JUCE 7, under ISC (JUCE 8+ is
+ * AGPL; notice in THIRD_PARTY.md):
  * the same 8 combs + 4 all-passes per channel, tunings, stereo spread, input
  * gain, scale factors and 10 ms parameter ramps, so a preset rings as its
  * author heard it.

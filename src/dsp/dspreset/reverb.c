@@ -1,4 +1,5 @@
 #include "reverb.h"
+#include "ramp.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -32,9 +33,6 @@ static const int ALLPASS_TUNING[ALLPASSES] = {556, 441, 341, 225};
 typedef struct { float *buf; int size, pos; float last; } comb_t;
 typedef struct { float *buf; int size, pos; } allpass_t;
 
-/* juce::SmoothedValue<float>, linear. */
-typedef struct { float now, target, step; int left; } ramp_t;
-
 struct ds_reverb {
     comb_t comb[2][COMBS];
     allpass_t allpass[2][ALLPASSES];
@@ -45,20 +43,6 @@ struct ds_reverb {
 };
 
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
-
-static void ramp_to(ramp_t *r, float target, int steps, int snap) {
-    if (target == r->target && !snap) return;
-    r->target = target;
-    if (snap || steps <= 0) { r->now = target; r->left = 0; return; }
-    r->left = steps;
-    r->step = (target - r->now) / (float)steps;
-}
-
-static inline float ramp_next(ramp_t *r) {
-    if (r->left <= 0) return r->target;
-    if (--r->left > 0) r->now += r->step; else r->now = r->target;
-    return r->now;
-}
 
 static inline float comb_process(comb_t *c, float input, float damp, float feedback) {
     float out = c->buf[c->pos];
@@ -101,6 +85,7 @@ ds_reverb_t *ds_reverb_create(float sample_rate) {
     }
     r->idle = 1;
     ds_reverb_set(r, 0.7f, 0.3f, 0.0f);          /* DecentSampler's defaults */
+    r->primed = 0;                               /* the caller's first setting lands at once */
     return r;
 }
 
@@ -141,8 +126,8 @@ void ds_reverb_process(ds_reverb_t *r, float *lr, unsigned frames) {
      * ~100 KB, once per knob move off 0). */
     if (r->wet.target == 0.0f && r->wet.left <= 0) {
         r->stale = 1;
-        ramp_to(&r->damping, r->damping.target, 0, 1);
-        ramp_to(&r->feedback, r->feedback.target, 0, 1);
+        ramp_land(&r->damping);
+        ramp_land(&r->feedback);
         return;
     }
     if (r->stale) { r->stale = 0; ds_reverb_clear(r); }
@@ -150,9 +135,9 @@ void ds_reverb_process(ds_reverb_t *r, float *lr, unsigned frames) {
         unsigned i = 0;
         while (i < 2 * frames && fabsf(lr[i]) < SILENT_LEVEL) ++i;
         if (i == 2 * frames) {               /* still nothing: skip, settings land */
-            ramp_to(&r->damping, r->damping.target, 0, 1);
-            ramp_to(&r->feedback, r->feedback.target, 0, 1);
-            ramp_to(&r->wet, r->wet.target, 0, 1);
+            ramp_land(&r->damping);
+            ramp_land(&r->feedback);
+            ramp_land(&r->wet);
             return;
         }
         r->idle = 0;

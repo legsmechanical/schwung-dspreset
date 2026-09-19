@@ -22,6 +22,9 @@ source.
 - **Filters, EQ and gain** from the preset's effects, with its knobs driving them.
 - **Reverb:** the same reverb DecentSampler uses (JUCE's), so a preset's reverb sounds as its
   author set it.
+- **Chorus and delay**, with the preset's knobs driving them. The chorus works the way
+  DecentSampler's does; the delay echoes at the preset's times, left and right apart by its
+  stereo offset.
 
 - **An amp envelope for every preset** on its own page, drawn as an envelope: Attack, Decay,
   Sustain and Release, and an Override switch. Off, they show the preset's own envelope; on,
@@ -29,8 +32,8 @@ source.
 - **Modulators:** envelopes and LFOs sweep filters, pitch, volume and pan, per note or shared,
   with the preset's knobs setting their depth, rate and times.
 
-Not yet: delay, chorus and the other time-based effects (their knobs show up but do
-nothing yet), and FLAC samples.
+Not yet: phaser and the other remaining effects, tempo-synced delay (their knobs show up
+but do nothing yet), and FLAC samples.
 
 ## Using it
 

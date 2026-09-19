@@ -100,8 +100,9 @@ disabled effect are exact pass-throughs. Instrument effects run on the mix; grou
 inside each note with fresh state, as DecentSampler does.
 
 **Reverb** (`reverb.c`) is `juce::Reverb` itself — the reverb DecentSampler runs (confirmed by
-Josh 2026-09-18, not inferred from the matching parameter names) — ported to C from JUCE's ISC
-`juce_Reverb.h` (notice in `THIRD_PARTY.md`, shipped in the package). Same 8 combs + 4
+Josh 2026-09-18, not inferred from the matching parameter names) — ported to C from
+`juce_Reverb.h` as released in JUCE 7, under ISC (notice in `THIRD_PARTY.md`, shipped in the
+package). ⚠ JUCE 8+ relicensed it AGPL: never port from a JUCE 8+ file. Same 8 combs + 4
 all-passes per channel, tunings, spread, gains and 10 ms ramps; `test_reverb` holds it to a
 second plain transcription sample by sample. DecentSampler exposes only roomSize / damping /
 wetLevel: width is 1 and dry passes at UNITY — ⚠ DecentSampler's own dry level is the one thing
@@ -110,7 +111,22 @@ JUCE would keep it running unheard), and with no input it stops working once the
 stayed under -130 dB longer than any path through the network. Instrument-level only: a
 group-level reverb would be a reverb per note and stays off. (A Dattorro plate was built first
 and replaced; it is in git history, `db54fda`.)
-Delay, chorus, phaser and the rest still pass through.
+**Chorus** (`chorus.c`) BEHAVES as `juce::dsp::Chorus` with its defaults for the two settings
+DecentSampler does not expose (centre 7 ms, feedback 0): one sine LFO shared by both channels
+sweeps a linearly interpolated delay of `max(1, 7 + 10·depth·lfo)` ms, linear mix, 50 ms glides.
+⚠ That DecentSampler runs JUCE's chorus is INFERRED from its three matching controls, not
+confirmed. ⚠ **JUCE's `juce_dsp` is GPL/AGPL — never port its code**: `chorus.c` is our own,
+written from that description, and `test_chorus` holds it to a formula, not to JUCE's source.
+Mix 0 skips it once faded; silence idles it. The LFO phase is a double: in float a slow LFO's step
+is under the phase's precision and the rate drifts ~1%.
+**Delay** (`delay.c`) is our own design — DecentSampler documents its controls, not its insides:
+each channel echoes itself at `delayTime ∓ stereoOffset/2`, dry at unity plus echoes at
+wetLevel, feedback capped at 0.99, every setting gliding over 50 ms (a time change bends pitch).
+The line is sized at load from the preset's own times, or 25 s when a control or modulator can
+move the time or offset. `delayTimeFormat="musical_time"` is not rendered (the value → note
+length mapping is undocumented). Both are instrument-level only, like the reverb, and a first
+setting lands at once (`primed` is cleared after `create`'s defaults).
+Phaser and the rest still pass through.
 
 The output stage is a soft clip: exact to 0.9, then bending to a 1.0 ceiling
 (`test_render` E2). Hard notes through a boosted EQ saturate rather than square off.
@@ -168,8 +184,8 @@ sustain 1. Pan is a balance law. Velocity: `1 - t + t·vel/127` with `ampVelTrac
 
 ## Not implemented yet
 
-Effects: delay, chorus, phaser (reuse a permissively licensed fleet module — never
-`schwung-drumverb`), convolution, pitch shift, wave shaper/folder, group-level reverb.
+Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
+delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
 Also: per-tag polyphony and `silencedByTags`, xy-pads, SAMPLE_START/LOOP bindings, per-sample-tag
 bindings, loop crossfades, envelope curve shapes, FLAC samples, legato/first triggers,
 musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth

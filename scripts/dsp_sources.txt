@@ -12,3 +12,5 @@ src/dsp/dspreset/catalog.c
 src/dsp/dspreset/preset_model.c
 src/dsp/dspreset/effects.c
 src/dsp/dspreset/reverb.c
+src/dsp/dspreset/chorus.c
+src/dsp/dspreset/delay.c

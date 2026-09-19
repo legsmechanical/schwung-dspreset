@@ -138,6 +138,25 @@ static void resolve_bounds(ds_zone_t *z, const ds_source_t *s) {
     else z->streams = (z->loop ? z->loop_end : z->end) > s->head_frames || z->start >= s->head_frames;
 }
 
+/* The longest echo delay effect `x` can reach, in seconds: its own time and
+ * offset, or DecentSampler's full range (20 s, offset 10 s) when a control or
+ * modulator can move either. */
+static float longest_delay(const ds_preset_model_t *m, unsigned x) {
+    const ds_effect_t *fx = &m->effects[x];
+    float time = ds_fx_param(fx, "delayTime", ds_fx_default("delay", "delayTime"));
+    float offset = ds_fx_param(fx, "stereoOffset", 0);
+    for (unsigned i = 0; i < m->binding_count; ++i) {
+        const ds_binding_t *b = &m->bindings[i];
+        if (b->target != DS_TARGET_EFFECT || (strcmp(b->name, "FX_DELAY_TIME") && strcmp(b->name, "FX_STEREO_OFFSET"))) continue;
+        if (b->tag_mask ? (fx->tag_mask & b->tag_mask) != 0 : b->effect == (int)x) { time = 20; offset = 10; break; }
+    }
+    if (time < 0) time = 0;
+    if (time > 20) time = 20;
+    if (offset < 0) offset = -offset;
+    if (offset > 10) offset = 10;
+    return time + 0.5f * offset;
+}
+
 int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
                           unsigned output_rate, ds_cancel_fn cancelled, void *cancel_context,
                           char *error, unsigned error_len) {
@@ -223,14 +242,18 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
      * triggerOnLoad default) so the sound matches what the preset shows. */
     for (unsigned c = 0; c < e->model.control_count; ++c) ds_native_engine_set_control(e, c, e->model.controls[c].def);
     for (unsigned x = 0; x < e->model.effect_count; ++x) { ds_fx_prepare(&e->fx_coeffs[x], &e->model.effects[x], (float)output_rate); e->fx_dirty[x] = 0; }
-    /* An instrument-level reverb gets its buffers now (the audio thread never
-     * allocates). A GROUP-level one would be a reverb per note, as DecentSampler
-     * runs it — far too heavy here — so it stays off. */
-    for (unsigned x = 0; x < e->model.effect_count; ++x)
-        if (!strcmp(e->model.effects[x].type, "reverb") && e->model.effects[x].group < 0 &&
-            !(e->reverb[x] = ds_reverb_create((float)output_rate))) {
-            fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1;
-        }
+    /* An instrument-level reverb, chorus or delay gets its buffers now (the
+     * audio thread never allocates). A GROUP-level one would be one per note,
+     * as DecentSampler runs it — too heavy here — so it stays off. */
+    for (unsigned x = 0; x < e->model.effect_count; ++x) {
+        const ds_effect_t *fx = &e->model.effects[x];
+        int made = 1;
+        if (fx->group >= 0) continue;
+        if (!strcmp(fx->type, "reverb")) made = (e->reverb[x] = ds_reverb_create((float)output_rate)) != NULL;
+        else if (!strcmp(fx->type, "chorus")) made = (e->chorus[x] = ds_chorus_create((float)output_rate)) != NULL;
+        else if (!strcmp(fx->type, "delay")) made = (e->delay[x] = ds_delay_create((float)output_rate, longest_delay(&e->model, x))) != NULL;
+        if (!made) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
+    }
     for (unsigned k = 0; k < e->model.modulator_count; ++k) {
         const ds_modulator_t *m = &e->model.modulators[k];
         e->mod_global[k].stage = DS_ENV_DONE;                         /* a global envelope waits for a key */
@@ -255,7 +278,11 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
     for (unsigned i = 0; i < e->source_count; ++i) free(e->sources[i].head);
     for (int i = 0; i < DS_MAX_VOICES; ++i) if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
     for (int i = 0; i < DS_MAX_VOICES; ++i) free(e->voices[i].ring);
-    for (unsigned x = 0; x < DS_MAX_EFFECTS; ++x) ds_reverb_destroy(e->reverb[x]);
+    for (unsigned x = 0; x < DS_MAX_EFFECTS; ++x) {
+        ds_reverb_destroy(e->reverb[x]);
+        ds_chorus_destroy(e->chorus[x]);
+        ds_delay_destroy(e->delay[x]);
+    }
     free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt);
     ds_preset_model_free(&e->model);
     memset(e, 0, sizeof(*e));
@@ -530,13 +557,6 @@ static void voice_mod_settings(const ds_native_engine_t *e, const ds_voice_t *v,
     }
 }
 
-static float effect_param_default(const ds_effect_t *fx, const char *name) {
-    if (!strcmp(name, "frequency")) return !strcmp(fx->type, "peak") || !strcmp(fx->type, "notch") ? 10000 : 22000;
-    if (!strcmp(name, "resonance") || !strcmp(name, "q")) return 0.7f;
-    if (!strcmp(name, "gain")) return 1;
-    return 0;
-}
-
 /* Has any setting moved since `built`? A relative change under 1e-4 does not
  * count: the tail of an exponential decay would otherwise rebuild every block
  * for an inaudible difference. */
@@ -566,7 +586,7 @@ static void modulated_effect(ds_native_engine_t *e, unsigned x, const float *val
             if (b->tag_mask ? !(fx.tag_mask & b->tag_mask) : b->effect != (int)x) continue;
             if (!(name = effect_attribute(b->name))) continue;
             mod_translate(m, b, values[k], &t, &n);
-            set_effect_value(&fx, b->name, mod_apply(b->mod_behavior, ds_fx_param(&fx, name, effect_param_default(&fx, name)), t, n));
+            set_effect_value(&fx, b->name, mod_apply(b->mod_behavior, ds_fx_param(&fx, name, ds_fx_default(fx.type, name)), t, n));
         }
     }
     if (!fx_settings_moved(&fx, built)) return;
@@ -894,8 +914,8 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
             unsigned x = v->fx_index[k];
             chain[k] = &e->fx_coeffs[x];
             if (e->fx_modulated[x]) { modulated_effect(e, x, values, 1, &v->fx_live[k], &v->fx_built[k]); chain[k] = &v->fx_live[k]; }
-            /* (a reverb inside a note is not run: see the load) */
-            filtering |= chain[k]->kind != DS_FX_BYPASS && chain[k]->kind != DS_FX_UNSUPPORTED && chain[k]->kind != DS_FX_REVERB;
+            /* (a reverb, chorus or delay inside a note is not run: see the load) */
+            filtering |= chain[k]->kind == DS_FX_BIQUAD || chain[k]->kind == DS_FX_ONEPOLE || chain[k]->kind == DS_FX_GAIN;
         }
         if (!filtering || frames > 256) {
             /* Nothing to run this block (a filter swept wide open): straight out.
@@ -932,6 +952,10 @@ void ds_native_engine_render(ds_native_engine_t *e, float *out_lr, unsigned fram
         if (e->fx_modulated[x]) { modulated_effect(e, x, e->mod_global_value, 0, &e->fx_live[x], &e->fx_live_built[x]); c = &e->fx_live[x]; }
         if (c->kind == DS_FX_REVERB) {
             if (e->reverb[x]) { ds_reverb_set(e->reverb[x], c->room, c->damping, c->wet); ds_reverb_process(e->reverb[x], out_lr, frames); }
+        } else if (c->kind == DS_FX_CHORUS) {
+            if (e->chorus[x]) { ds_chorus_set(e->chorus[x], c->mix, c->depth, c->rate); ds_chorus_process(e->chorus[x], out_lr, frames); }
+        } else if (c->kind == DS_FX_DELAY) {
+            if (e->delay[x]) { ds_delay_set(e->delay[x], c->time, c->offset, c->feedback, c->wet); ds_delay_process(e->delay[x], out_lr, frames); }
         } else {
             ds_fx_process(c, &e->fx_state[x], out_lr, frames);
         }

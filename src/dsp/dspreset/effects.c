@@ -9,6 +9,21 @@ float ds_fx_param(const ds_effect_t *fx, const char *name, float fallback) {
     return fallback;
 }
 
+float ds_fx_default(const char *type, const char *name) {
+    static const struct { const char *type, *name; float value; } defaults[] = {
+        {"reverb", "roomSize", 0.7f}, {"reverb", "damping", 0.3f}, {"reverb", "wetLevel", 0},
+        {"chorus", "mix", 0.5f}, {"chorus", "modDepth", 0.2f}, {"chorus", "modRate", 0.2f},
+        {"delay", "delayTime", 0.7f}, {"delay", "stereoOffset", 0}, {"delay", "feedback", 0.2f},
+        {"delay", "wetLevel", 0.5f}, {"gain", "level", 0},
+        {"peak", "frequency", 10000}, {"notch", "frequency", 10000}, {NULL, "frequency", 22000},
+        {NULL, "resonance", 0.7f}, {NULL, "q", 0.7f}, {NULL, "gain", 1}};
+    for (unsigned i = 0; i < sizeof(defaults) / sizeof(defaults[0]); ++i)
+        if ((!defaults[i].type || !strcmp(defaults[i].type, type)) && !strcmp(defaults[i].name, name)) return defaults[i].value;
+    return 0;
+}
+
+static float setting(const ds_effect_t *fx, const char *name) { return ds_fx_param(fx, name, ds_fx_default(fx->type, name)); }
+
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
@@ -28,12 +43,32 @@ void ds_fx_prepare(ds_fx_coeffs_t *c, const ds_effect_t *fx, float sr) {
     }
     if (!strcmp(t, "reverb")) {
         /* DecentSampler's defaults: roomSize 0.7, damping 0.3, wetLevel 0 (silent) */
-        c->room = clampf(ds_fx_param(fx, "roomSize", 0.7f), 0, 1);
-        c->damping = clampf(ds_fx_param(fx, "damping", 0.3f), 0, 1);
-        c->wet = clampf(ds_fx_param(fx, "wetLevel", 0.0f), 0, 1);
+        c->room = clampf(setting(fx, "roomSize"), 0, 1);
+        c->damping = clampf(setting(fx, "damping"), 0, 1);
+        c->wet = clampf(setting(fx, "wetLevel"), 0, 1);
         /* at wetLevel 0 the reverb still runs until its 10 ms fade is out;
          * then it skips itself (reverb.c) */
         c->kind = DS_FX_REVERB;
+        return;
+    }
+    if (!strcmp(t, "chorus")) {
+        /* DecentSampler's defaults: mix 0.5, modDepth 0.2, modRate 0.2 Hz */
+        c->mix = clampf(setting(fx, "mix"), 0, 1);
+        c->depth = clampf(setting(fx, "modDepth"), 0, 1);
+        c->rate = clampf(setting(fx, "modRate"), 0, 10);
+        c->kind = DS_FX_CHORUS;
+        return;
+    }
+    if (!strcmp(t, "delay")) {
+        /* Tempo-synced time (delayTimeFormat="musical_time") needs a mapping
+         * DecentSampler does not document: left silent rather than guessed. */
+        if (ds_fx_param(fx, "musicalTime", 0) > 0.5f) { c->kind = DS_FX_UNSUPPORTED; return; }
+        /* defaults: delayTime 0.7 s, stereoOffset 0, feedback 0.2, wetLevel 0.5 */
+        c->time = clampf(setting(fx, "delayTime"), 0, 20);
+        c->offset = clampf(setting(fx, "stereoOffset"), -10, 10);
+        c->feedback = clampf(setting(fx, "feedback"), 0, 1);
+        c->wet = clampf(setting(fx, "wetLevel"), 0, 1);
+        c->kind = DS_FX_DELAY;
         return;
     }
     if (!strcmp(t, "lowpass_1pl")) {

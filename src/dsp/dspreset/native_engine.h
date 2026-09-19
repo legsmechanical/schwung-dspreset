@@ -8,6 +8,8 @@
 #include "dspreset_parser.h"
 #include "effects.h"
 #include "reverb.h"
+#include "chorus.h"
+#include "delay.h"
 #include "preset_model.h"
 #include "wav_source.h"
 
@@ -119,6 +121,8 @@ typedef struct {
     unsigned char fx_dirty[DS_MAX_EFFECTS];
     ds_fx_state_t fx_state[DS_MAX_EFFECTS];
     ds_reverb_t *reverb[DS_MAX_EFFECTS];  /* instrument-level reverbs, made at load */
+    ds_chorus_t *chorus[DS_MAX_EFFECTS];  /* instrument-level choruses, made at load */
+    ds_delay_t *delay[DS_MAX_EFFECTS];    /* instrument-level delays, made at load */
     /* Modulators: shared state for global ones, their value this block, the
      * last value of every CC (for <midiCC>), keys held (a global envelope
      * gates on the first key down and the last key up), and which effects any

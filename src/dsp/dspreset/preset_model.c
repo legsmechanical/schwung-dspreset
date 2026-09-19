@@ -372,6 +372,10 @@ int ds_preset_model_load(ds_preset_model_t *m, const char *path, char *error, un
                 snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "levelLinear");
                 fx->param_values[fx->param_count++] = 1;
             }
+            if (attr(a, end, "delayTimeFormat", text, sizeof(text)) && !strcasecmp(text, "musical_time")) {
+                snprintf(fx->param_names[fx->param_count], sizeof(fx->param_names[0]), "musicalTime");
+                fx->param_values[fx->param_count++] = 1;
+            }
             while (q < end && fx->param_count < DS_MAX_EFFECT_PARAMS) {    /* every numeric attribute */
                 char key[24]; unsigned n = 0; float v;
                 while (q < end && !is_name_char(*q)) ++q;
