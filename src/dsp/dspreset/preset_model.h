@@ -31,6 +31,10 @@ enum {
     DS_TARGET_SILENCING_MODE,         /* 0 fast, 1 normal */
     DS_TARGET_SILENCING_DECAY,
     DS_TARGET_TAG_POLYPHONY,
+    /* frame positions and key/velocity ranges, set live on a group or the instrument */
+    DS_TARGET_SAMPLE_START, DS_TARGET_SAMPLE_END, DS_TARGET_LOOP_START, DS_TARGET_LOOP_END,
+    DS_TARGET_ROOT_NOTE, DS_TARGET_LO_NOTE, DS_TARGET_HI_NOTE, DS_TARGET_LO_VEL, DS_TARGET_HI_VEL,
+    DS_TARGET_AMP_ENV_ENABLED,
 };
 
 /* How a modulator's value lands on its target (DecentSampler's modBehavior;
@@ -96,6 +100,11 @@ typedef struct {
     float key_track, silencing_decay;
     int silencing_mode;
     int has_key_track, has_silencing_mode, has_silencing_decay;
+    /* Set only by bindings; `live` says which (DS_OWN_* bits of dspreset_parser.h). */
+    unsigned live;
+    int64_t frames[4];                /* start, end, loopStart, loopEnd as written (inclusive ends) */
+    int keys[5];                      /* rootNote, loNote, hiNote, loVel, hiVel */
+    int amp_env;
     int enabled;
     uint64_t tag_mask;
 } ds_group_settings_t;

@@ -32,14 +32,20 @@ typedef struct {
     int resident;
 } ds_source_t;
 
+/* Where a note plays in its file: resolved against the file at load for each
+ * zone, and again per note when a binding moves a start, end or loop point. */
+typedef struct {
+    uint64_t start, end;                /* end exclusive */
+    uint64_t loop_start, loop_end;      /* loop_end exclusive */
+    uint64_t xf;                        /* loop crossfade, frames before loop_end (0 = none) */
+    int loop, streams, xf_equal_power;  /* streams: needs frames beyond the resident head */
+} ds_bounds_t;
+
 /* A zone with its frame bounds resolved against the file. */
 typedef struct {
     ds_dspreset_sample_t def;
     int source;                         /* -1: sample file missing/unreadable */
-    uint64_t start, end;                /* end exclusive */
-    int loop;
-    uint64_t loop_start, loop_end;      /* loop_end exclusive */
-    int streams;                        /* needs frames beyond the resident head */
+    ds_bounds_t b;
     uint64_t tag_mask;                  /* in the model's tag numbering */
     uint64_t silenced_by;               /* silencedByTags, same numbering */
 } ds_zone_t;
@@ -67,6 +73,11 @@ typedef struct {
     /* audio-thread only */
     const ds_zone_t *zone;
     const ds_source_t *src;
+    /* This note's bounds. Written before the stream word is published; the
+     * worker reads them after (field by field, then sanitised: a restart may
+     * overwrite them mid-read, and that fill is discarded anyway). */
+    ds_bounds_t b;
+    int amp_env;                        /* the zone's amp envelope is on (AMP_ENV_ENABLED may move it) */
     double pos, inc;                    /* virtual frame; frames per output frame */
     float gain_l, gain_r;
     int env_stage;
@@ -107,6 +118,7 @@ typedef struct {
      * process's soft limit is 1024 and it is shared with everything else. */
     int stream_fd[DS_MAX_VOICES];
     uint64_t stream_key[DS_MAX_VOICES]; /* generation+zone the descriptor was opened for */
+    float *xf_scratch;                  /* the far side of a loop crossfade, read from disk */
     uint64_t resident_bytes;
     /* The preset's controls and what they write into. Written by the audio
      * thread only (control changes, CCs), or by the worker before publish. */

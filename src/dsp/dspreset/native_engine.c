@@ -27,10 +27,22 @@ static uint32_t packed_zone(uint64_t word) { return (uint32_t)(word >> 32) & 0xf
 static uint32_t packed_produced(uint64_t word) { return (uint32_t)word; }
 
 /* Virtual frame (position along the play path, loops unrolled) -> file frame. */
-static uint64_t map_frame(const ds_zone_t *zone, uint64_t v) {
-    if (zone->loop && v >= zone->loop_end)
-        return zone->loop_start + (v - zone->loop_start) % (zone->loop_end - zone->loop_start);
+static uint64_t map_frame(const ds_bounds_t *b, uint64_t v) {
+    if (b->loop && v >= b->loop_end)
+        return b->loop_start + (v - b->loop_start) % (b->loop_end - b->loop_start);
     return v;
+}
+
+/* A loop crossfade: over the last `xf` frames before the loop end, the audio
+ * as far BEFORE the loop start fades in as the end fades out, so the loop
+ * point meets what came before it. 0 outside that stretch. */
+static inline int xf_gains(const ds_bounds_t *b, uint64_t f, float *out_gain, float *in_gain) {
+    float t;
+    if (!b->xf || !b->loop || f >= b->loop_end || f < b->loop_end - b->xf) return 0;
+    t = (float)(f - (b->loop_end - b->xf)) / (float)b->xf;
+    if (b->xf_equal_power) { *out_gain = cosf(t * (float)M_PI_2); *in_gain = sinf(t * (float)M_PI_2); }
+    else { *out_gain = 1.0f - t; *in_gain = t; }
+    return 1;
 }
 
 /* ---- loading ------------------------------------------------------------ */
@@ -119,23 +131,42 @@ static int source_for(ds_native_engine_t *e, const char *path) {
     return (int)(e->source_count - 1);
 }
 
-static void resolve_bounds(ds_zone_t *z, const ds_source_t *s) {
-    const ds_dspreset_sample_t *d = &z->def;
+/* Frame bounds from the preset's numbers (-1 = not set; ends as written, i.e.
+ * the last frame played) against the file. */
+static void compute_bounds(const ds_source_t *s, int64_t start, int64_t end, int loop_enabled,
+                           int64_t loop_start, int64_t loop_end, int64_t xf, int equal_power, ds_bounds_t *b) {
     uint64_t frames = s->file.frame_count;
     int loop_on;
-    z->start = d->start >= 0 ? (uint64_t)d->start : 0;
-    z->end = d->end >= 0 ? (uint64_t)d->end + 1 : frames;   /* DS `end` is the last frame played */
-    if (z->end > frames) z->end = frames;
-    if (z->start >= z->end) z->start = 0;
+    b->start = start >= 0 ? (uint64_t)start : 0;
+    b->end = end >= 0 ? (uint64_t)end + 1 : frames;          /* DS `end` is the last frame played */
+    if (b->end > frames) b->end = frames;
+    if (b->start >= b->end) b->start = 0;
     /* An explicit loopEnabled wins; otherwise a loop the file carries is used,
      * as DecentSampler does with embedded markers. */
-    loop_on = d->loop_enabled == 1 || (d->loop_enabled == -1 && s->file.has_loop);
-    z->loop_start = d->loop_start >= 0 ? (uint64_t)d->loop_start : s->file.has_loop ? s->file.loop_start : z->start;
-    z->loop_end = d->loop_end >= 0 ? (uint64_t)d->loop_end + 1 : s->file.has_loop ? s->file.loop_end + 1 : z->end;
-    if (z->loop_end > frames) z->loop_end = frames;
-    z->loop = loop_on && z->loop_end > z->loop_start + 1 && z->loop_end > z->start;
-    if (s->resident) z->streams = 0;
-    else z->streams = (z->loop ? z->loop_end : z->end) > s->head_frames || z->start >= s->head_frames;
+    loop_on = loop_enabled == 1 || (loop_enabled == -1 && s->file.has_loop);
+    b->loop_start = loop_start >= 0 ? (uint64_t)loop_start : s->file.has_loop ? s->file.loop_start : b->start;
+    b->loop_end = loop_end >= 0 ? (uint64_t)loop_end + 1 : s->file.has_loop ? s->file.loop_end + 1 : b->end;
+    if (b->loop_end > frames) b->loop_end = frames;
+    b->loop = loop_on && b->loop_end > b->loop_start + 1 && b->loop_end > b->start;
+    /* The fade needs as much audio before the loop start as it is long: a
+     * loop starting at the file's start (CS-20M, DS The Synths) has none, so
+     * it keeps its plain loop point. */
+    b->xf = b->loop && xf > 0 ? (uint64_t)xf : 0;
+    if (b->xf > 65536) b->xf = 65536;
+    if (b->xf) {
+        uint64_t before = b->loop_start > b->start ? b->loop_start - b->start : 0;
+        if (b->xf > before) b->xf = before;
+        if (b->xf > b->loop_end - b->loop_start) b->xf = b->loop_end - b->loop_start;
+    }
+    b->xf_equal_power = equal_power;
+    if (s->resident) b->streams = 0;
+    else b->streams = (b->loop ? b->loop_end : b->end) > s->head_frames || b->start >= s->head_frames;
+}
+
+static void resolve_bounds(ds_zone_t *z, const ds_source_t *s) {
+    const ds_dspreset_sample_t *d = &z->def;
+    compute_bounds(s, d->start, d->end, d->loop_enabled, d->loop_start, d->loop_end,
+                   d->loop_crossfade, d->loop_crossfade_equal_power, &z->b);
 }
 
 /* The longest echo delay effect `x` can reach, in seconds: its own time and
@@ -269,6 +300,9 @@ int ds_native_engine_load(ds_native_engine_t *e, const char *preset_path,
                 if (b->tag_mask ? (e->model.effects[x].tag_mask & b->tag_mask) != 0 : b->effect == (int)x) e->fx_modulated[x] = 1;
         }
     }
+    if (!(e->xf_scratch = calloc((size_t)DS_FILL_FRAMES * 8, sizeof(float)))) {
+        fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1;
+    }
     for (int i = 0; i < DS_MAX_VOICES; ++i) {
         e->voices[i].ring = malloc((size_t)DS_RING_FRAMES * 2 * sizeof(float));
         if (!e->voices[i].ring) { fail(error, error_len, "out of memory"); ds_native_engine_destroy(e); return -1; }
@@ -288,7 +322,7 @@ void ds_native_engine_destroy(ds_native_engine_t *e) {
         ds_chorus_destroy(e->chorus[x]);
         ds_delay_destroy(e->delay[x]);
     }
-    free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt);
+    free(e->sources); free(e->source_paths); free(e->zones); free(e->group_len); free(e->groups_rt); free(e->xf_scratch);
     ds_preset_model_free(&e->model);
     memset(e, 0, sizeof(*e));
 }
@@ -303,7 +337,25 @@ static float coef_for(float seconds, unsigned rate) {
  * A zone's volume, pitch, pan and envelope come from its own attributes where
  * it sets them, else its group's LIVE settings, else the instrument's — so a
  * control bound to a group or the instrument moves everything that inherits. */
-typedef struct { float gain, pan, vel_track, env[4], key_track, silencing_decay; int silencing_mode; double tuning; } zone_now_t;
+typedef struct { float gain, pan, vel_track, env[4], key_track, silencing_decay; int silencing_mode, root; double tuning; } zone_now_t;
+
+/* Frame positions, key/velocity ranges, root and amp-envelope switch: a
+ * binding on the group wins, then one on the instrument, then the sample's
+ * own value (every sample sets its own range, so it cannot win here). */
+static int64_t pick_frame(const ds_zone_t *z, const ds_group_settings_t *g, const ds_group_settings_t *in,
+                          int i, unsigned bit, int64_t own) {
+    (void)z;
+    if (g->live & bit) return g->frames[i];
+    if (in->live & bit) return in->frames[i];
+    return own;
+}
+static int pick_key(const ds_zone_t *z, const ds_group_settings_t *g, const ds_group_settings_t *in,
+                    int i, unsigned bit, int own) {
+    (void)z;
+    if (g->live & bit) return i < 0 ? g->amp_env : g->keys[i];
+    if (in->live & bit) return i < 0 ? in->amp_env : in->keys[i];
+    return own;
+}
 
 static int zone_enabled(const ds_native_engine_t *e, const ds_zone_t *z) {
     uint64_t tags = z->tag_mask;
@@ -325,6 +377,7 @@ static void zone_now_from(const ds_native_engine_t *e, const ds_zone_t *z, const
     out->vel_track = (d->own_mask & DS_OWN_VEL_TRACK) ? d->amp_vel_track : g->has_vel_track ? g->vel_track : in->vel_track;
     for (int i = 0; i < 4; ++i)
         out->env[i] = (d->own_mask & own_env[i]) ? def_env[i] : g->has_env[i] ? g->env[i] : in->env[i];
+    out->root = pick_key(z, g, in, 0, DS_OWN_ROOT, d->root_note);
     out->key_track = (d->own_mask & DS_OWN_KEY_TRACK) ? d->pitch_key_track : g->has_key_track ? g->key_track : in->key_track;
     out->silencing_mode = (d->own_mask & DS_OWN_SILENCING_MODE) ? d->silencing_mode :
                           g->has_silencing_mode ? g->silencing_mode : in->silencing_mode;
@@ -352,6 +405,22 @@ static void set_group_value(ds_group_settings_t *g, int target, float v) {
     case DS_TARGET_KEY_TRACK: g->key_track = v < 0 ? 0 : v > 1 ? 1 : v; g->has_key_track = 1; break;
     case DS_TARGET_SILENCING_MODE: g->silencing_mode = v >= 0.5f ? DS_SILENCE_NORMAL : DS_SILENCE_FAST; g->has_silencing_mode = 1; break;
     case DS_TARGET_SILENCING_DECAY: g->silencing_decay = v < 0 ? 0 : v; g->has_silencing_decay = 1; break;
+    case DS_TARGET_SAMPLE_START: case DS_TARGET_SAMPLE_END: case DS_TARGET_LOOP_START: case DS_TARGET_LOOP_END: {
+        static const unsigned bits[4] = {DS_OWN_START, DS_OWN_END, DS_OWN_LOOP_START, DS_OWN_LOOP_END};
+        int i = target - DS_TARGET_SAMPLE_START;
+        g->frames[i] = v < 0 ? 0 : (int64_t)llrint(v);
+        g->live |= bits[i];
+        break;
+    }
+    case DS_TARGET_ROOT_NOTE: case DS_TARGET_LO_NOTE: case DS_TARGET_HI_NOTE: case DS_TARGET_LO_VEL: case DS_TARGET_HI_VEL: {
+        static const unsigned bits[5] = {DS_OWN_ROOT, DS_OWN_LO_NOTE, DS_OWN_HI_NOTE, DS_OWN_LO_VEL, DS_OWN_HI_VEL};
+        int i = target - DS_TARGET_ROOT_NOTE;
+        long k = lrintf(v);
+        g->keys[i] = k < 0 ? 0 : k > 127 ? 127 : (int)k;
+        g->live |= bits[i];
+        break;
+    }
+    case DS_TARGET_AMP_ENV_ENABLED: g->amp_env = v >= 0.5f; g->live |= DS_OWN_AMP_ENV; break;
     default: break;
     }
 }
@@ -639,7 +708,26 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
 
     zone_now(e, z, &now);
     v->zone = z; v->src = s;
-    v->pos = (double)z->start;
+    {
+        const ds_group_settings_t *g = &e->groups_rt[d->group_index], *in = &e->instrument_rt;
+        ds_bounds_t b = z->b;
+        if ((g->live | in->live) & (DS_OWN_START | DS_OWN_END | DS_OWN_LOOP_START | DS_OWN_LOOP_END))
+            compute_bounds(s, pick_frame(z, g, in, 0, DS_OWN_START, d->start), pick_frame(z, g, in, 1, DS_OWN_END, d->end),
+                           d->loop_enabled, pick_frame(z, g, in, 2, DS_OWN_LOOP_START, d->loop_start),
+                           pick_frame(z, g, in, 3, DS_OWN_LOOP_END, d->loop_end), d->loop_crossfade,
+                           d->loop_crossfade_equal_power, &b);
+        /* field by field: the worker may be reading the last note's */
+        __atomic_store_n(&v->b.start, b.start, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.end, b.end, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.loop_start, b.loop_start, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.loop_end, b.loop_end, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.xf, b.xf, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.loop, b.loop, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.streams, b.streams, __ATOMIC_RELAXED);
+        __atomic_store_n(&v->b.xf_equal_power, b.xf_equal_power, __ATOMIC_RELAXED);
+        v->amp_env = pick_key(z, g, in, -1, DS_OWN_AMP_ENV, d->amp_env_enabled);
+    }
+    v->pos = (double)v->b.start;
     v->vel = velocity / 127.0f;
     v->note_id = e->note_counter;
     v->choked = 0;
@@ -657,7 +745,7 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
     v->key_down = !one_shot; v->one_shot = one_shot; v->sustained = 0;
     v->age = ++e->age_counter;
     v->underruns = 0;
-    if (!d->amp_env_enabled) {
+    if (!v->amp_env) {
         v->env_stage = DS_ENV_SUSTAIN; v->env_level = 1.0f; v->env_sustain = 1.0f;
         v->env_release_coef = coef_for(0.005f, e->output_rate);
     } else {
@@ -670,9 +758,9 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
         v->env_stage = DS_ENV_ATTACK;
     }
     v->generation++;
-    if (z->streams) {
-        uint64_t ring_from = z->start >= s->head_frames ? z->start : s->head_frames;
-        atomic_store_explicit(&v->consumed, (uint32_t)z->start, memory_order_relaxed);
+    if (v->b.streams) {
+        uint64_t ring_from = v->b.start >= s->head_frames ? v->b.start : s->head_frames;
+        atomic_store_explicit(&v->consumed, (uint32_t)v->b.start, memory_order_relaxed);
         atomic_store_explicit(&v->stream, pack(v->generation, zone_index + 1, (uint32_t)ring_from),
                               memory_order_release);
     } else {
@@ -683,7 +771,7 @@ static void start_voice(ds_native_engine_t *e, const ds_zone_t *z, int note, int
 
 static void release_voice(ds_native_engine_t *e, ds_voice_t *v) {
     if (v->env_stage == DS_ENV_DONE) return;
-    if (v->zone->def.amp_env_enabled) {
+    if (v->amp_env) {
         zone_now_t now;
         zone_now(e, v->zone, &now);                     /* a Release knob reaches held notes */
         v->env_release_coef = coef_for(now.env[3] > 0.002f ? now.env[3] : 0.002f, e->output_rate);
@@ -699,9 +787,11 @@ static void release_voice(ds_native_engine_t *e, ds_voice_t *v) {
 }
 
 static int zone_matches(const ds_native_engine_t *e, const ds_zone_t *z, int note, int velocity, int trigger) {
-    return z->source >= 0 && z->def.trigger == trigger && zone_enabled(e, z) &&
-           note >= z->def.lo_note && note <= z->def.hi_note &&
-           velocity >= z->def.lo_vel && velocity <= z->def.hi_vel;
+    const ds_group_settings_t *g = &e->groups_rt[z->def.group_index], *in = &e->instrument_rt;
+    const ds_dspreset_sample_t *d = &z->def;
+    return z->source >= 0 && d->trigger == trigger && zone_enabled(e, z) &&
+           note >= pick_key(z, g, in, 1, DS_OWN_LO_NOTE, d->lo_note) && note <= pick_key(z, g, in, 2, DS_OWN_HI_NOTE, d->hi_note) &&
+           velocity >= pick_key(z, g, in, 3, DS_OWN_LO_VEL, d->lo_vel) && velocity <= pick_key(z, g, in, 4, DS_OWN_HI_VEL, d->hi_vel);
 }
 
 /* The one way a voice is cut short: over `decay` seconds when that is set,
@@ -870,15 +960,26 @@ void ds_native_engine_pitch_bend(ds_native_engine_t *e, int value14) {
 /* One frame from the resident head or the voice's ring; 0 when the worker
  * has not produced it yet. */
 static inline int fetch(const ds_voice_t *v, uint64_t vf, uint32_t produced, float *l, float *r) {
-    const ds_zone_t *z = v->zone;
+    const ds_bounds_t *b = &v->b;
     const ds_source_t *s = v->src;
     unsigned ch = s->file.channels;
-    uint64_t f = map_frame(z, vf);
+    uint64_t f = map_frame(b, vf);
     const float *frame;
-    if (!z->loop && vf >= z->end) { *l = *r = 0; return 1; }
-    if (f < s->head_frames) frame = s->head + f * ch;
-    else if (vf < produced) frame = v->ring + (vf & RING_MASK) * ch;
-    else return 0;
+    float g_out, g_in;
+    if (!b->loop && vf >= b->end) { *l = *r = 0; return 1; }
+    if (f < s->head_frames) {
+        frame = s->head + f * ch;
+        if (xf_gains(b, f, &g_out, &g_in)) {            /* the far side is in the head too */
+            const float *far = s->head + (f - (b->loop_end - b->loop_start)) * ch;
+            *l = frame[0] * g_out + far[0] * g_in;
+            *r = ch > 1 ? frame[1] * g_out + far[1] * g_in : *l;
+            return 1;
+        }
+    } else if (vf < produced) {
+        frame = v->ring + (vf & RING_MASK) * ch;        /* the worker mixed any crossfade in */
+    } else {
+        return 0;
+    }
     *l = frame[0];
     *r = ch > 1 ? frame[1] : frame[0];
     return 1;
@@ -894,9 +995,9 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         v->gain_l = gain * (now.pan > 0 ? 1.0f - now.pan : 1.0f);
         v->gain_r = gain * (now.pan < 0 ? 1.0f + now.pan : 1.0f);
         v->inc = ((double)v->src->file.sample_rate / e->output_rate) *
-                 pow(2.0, ((v->note - v->zone->def.root_note) * now.key_track + now.tuning) / 12.0);
+                 pow(2.0, ((v->note - now.root) * now.key_track + now.tuning) / 12.0);
         /* A Sustain moved while the note is held: glide there (never a jump). */
-        if (v->zone->def.amp_env_enabled && (v->env_stage == DS_ENV_DECAY || v->env_stage == DS_ENV_SUSTAIN)) {
+        if (v->amp_env && (v->env_stage == DS_ENV_DECAY || v->env_stage == DS_ENV_SUSTAIN)) {
             float target = now.env[2] < 0 ? 0 : now.env[2] > 1 ? 1 : now.env[2];
             if (fabsf(target - v->env_sustain) > 1e-4f) {
                 v->env_sustain = target;
@@ -912,7 +1013,7 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
     for (unsigned i = 0; i < frames; ++i) {
         uint64_t v0 = (uint64_t)v->pos;
         float frac = (float)(v->pos - (double)v0), l0, r0, l1, r1, level;
-        if (!v->zone->loop && v0 >= v->zone->end) { v->active = 0; break; }
+        if (!v->b.loop && v0 >= v->b.end) { v->active = 0; break; }
         if (!fetch(v, v0, produced, &l0, &r0) || !fetch(v, v0 + 1, produced, &l1, &r1)) {
             v->underruns++;             /* the worker is behind: hold, never skip */
             continue;
@@ -942,7 +1043,7 @@ static void render_voice(ds_native_engine_t *e, ds_voice_t *v, float *out, unsig
         out[2 * i + 1] += (r0 + (r1 - r0) * frac) * v->gain_r * level;
         v->pos += inc;
     }
-    if (v->zone->streams) atomic_store_explicit(&v->consumed, (uint32_t)v->pos, memory_order_release);
+    if (v->b.streams) atomic_store_explicit(&v->consumed, (uint32_t)v->pos, memory_order_release);
     if (!v->active) atomic_store_explicit(&v->stream, pack(v->generation, 0, 0), memory_order_release);
 }
 
@@ -1037,15 +1138,35 @@ unsigned ds_native_engine_active_voices(const ds_native_engine_t *e) {
 
 /* ---- worker ------------------------------------------------------------- */
 
-static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *z, uint64_t from, unsigned count) {
+/* The voice's bounds as the worker may use them: read field by field and made
+ * safe to index with, whatever a concurrent restart left half-written (that
+ * fill is discarded by the publish below). */
+static void worker_bounds(const ds_voice_t *v, const ds_source_t *s, ds_bounds_t *b) {
+    uint64_t frames = s->file.frame_count;
+    b->start = __atomic_load_n(&v->b.start, __ATOMIC_RELAXED);
+    b->end = __atomic_load_n(&v->b.end, __ATOMIC_RELAXED);
+    b->loop_start = __atomic_load_n(&v->b.loop_start, __ATOMIC_RELAXED);
+    b->loop_end = __atomic_load_n(&v->b.loop_end, __ATOMIC_RELAXED);
+    b->xf = __atomic_load_n(&v->b.xf, __ATOMIC_RELAXED);
+    b->loop = __atomic_load_n(&v->b.loop, __ATOMIC_RELAXED);
+    b->streams = __atomic_load_n(&v->b.streams, __ATOMIC_RELAXED);
+    b->xf_equal_power = __atomic_load_n(&v->b.xf_equal_power, __ATOMIC_RELAXED);
+    if (b->end > frames) b->end = frames;
+    if (b->start >= b->end) b->start = 0;
+    if (b->loop_end > frames || b->loop_end <= b->loop_start + 1) b->loop = 0;
+    if (!b->loop || b->xf > b->loop_start || b->xf > b->loop_end - b->loop_start) b->xf = 0;
+}
+
+static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *z, const ds_bounds_t *b,
+                 uint64_t from, unsigned count) {
     const ds_source_t *s = &e->sources[z->source];
     ds_wav_source_t file = s->file;
     unsigned ch = s->file.channels;
     char error[64];
     file.fd = fd;
     while (count) {
-        uint64_t f = map_frame(z, from);
-        uint64_t limit = z->loop && f < z->loop_end ? z->loop_end : z->end;
+        uint64_t f = map_frame(b, from);
+        uint64_t limit = b->loop && f < b->loop_end ? b->loop_end : b->end;
         unsigned run = count, slot = (unsigned)(from & RING_MASK);
         float *dst = v->ring + (size_t)slot * ch;
         if (run > limit - f) run = (unsigned)(limit - f);
@@ -1055,6 +1176,20 @@ static void fill(ds_native_engine_t *e, ds_voice_t *v, int fd, const ds_zone_t *
             memcpy(dst, s->head + f * ch, (size_t)run * ch * sizeof(float));
         } else if (fd < 0 || ds_wav_source_read_frames(&file, f, dst, run, error, sizeof(error)) != (int)run) {
             memset(dst, 0, (size_t)run * ch * sizeof(float));
+        }
+        if (b->xf && f + run > b->loop_end - b->xf) {       /* mix the loop crossfade in, here, off the audio thread */
+            uint64_t first = f > b->loop_end - b->xf ? f : b->loop_end - b->xf, len = b->loop_end - b->loop_start;
+            unsigned n = (unsigned)(f + run - first);
+            const float *far = NULL;
+            if (first - len + n <= s->head_frames) far = s->head + (first - len) * ch;
+            else if (fd >= 0 && e->xf_scratch && ch <= 8 &&
+                     ds_wav_source_read_frames(&file, first - len, e->xf_scratch, n, error, sizeof(error)) == (int)n)
+                far = e->xf_scratch;
+            for (unsigned k = 0; far && k < n; ++k) {
+                float g_out, g_in, *out = dst + (size_t)(first - f + k) * ch;
+                xf_gains(b, first + k, &g_out, &g_in);
+                for (unsigned c = 0; c < ch; ++c) out[c] = out[c] * g_out + far[(size_t)k * ch + c] * g_in;
+            }
         }
         from += run;
         count -= run;
@@ -1069,23 +1204,25 @@ unsigned ds_native_engine_service(ds_native_engine_t *e) {
         uint64_t word = atomic_load_explicit(&v->stream, memory_order_acquire);
         uint32_t zone_plus_one = packed_zone(word), produced, consumed;
         const ds_zone_t *z;
+        ds_bounds_t b;
         uint64_t space, count;
         if (!zone_plus_one) continue;
         z = &e->zones[zone_plus_one - 1];
+        worker_bounds(v, &e->sources[z->source], &b);
         produced = packed_produced(word);
         consumed = atomic_load_explicit(&v->consumed, memory_order_acquire);
-        if (!z->loop && produced >= z->end) continue;
+        if (!b.loop && produced >= b.end) continue;
         space = (uint64_t)consumed + DS_RING_FRAMES - produced;
         if (consumed > produced || space < 1024) continue;
         count = space < DS_FILL_FRAMES ? space : DS_FILL_FRAMES;
-        if (!z->loop && produced + count > z->end) count = z->end - produced;
+        if (!b.loop && produced + count > b.end) count = b.end - produced;
         /* The voice's own descriptor, reopened when it starts a new note. */
         if (e->stream_key[i] != (word >> 32)) {
             if (e->stream_fd[i] >= 0 && e->stream_key[i]) close(e->stream_fd[i]);
             e->stream_fd[i] = open(e->source_paths[z->source], O_RDONLY);
             e->stream_key[i] = word >> 32;
         }
-        fill(e, v, e->stream_fd[i], z, produced, (unsigned)count);
+        fill(e, v, e->stream_fd[i], z, &b, produced, (unsigned)count);
         /* Publish only if the voice was not restarted meanwhile. */
         if (atomic_compare_exchange_strong_explicit(&v->stream, &word,
                                                     (word & ~0xffffffffull) | (uint32_t)(produced + count),

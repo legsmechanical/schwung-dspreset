@@ -20,7 +20,7 @@ int main(void) {
                      "<sample path=\"s.wav\" rootNote=\"60\" start=\"20000\" release=\"0.1\"/>"
                      "</group></groups></DecentSampler>");
     CHECK(ds_native_engine_load(&engine, path, 44100, NULL, NULL, error, sizeof(error)) == 0);
-    CHECK(engine.zones[0].streams && engine.zones[0].start == 20000);
+    CHECK(engine.zones[0].b.streams && engine.zones[0].b.start == 20000);
 
     ds_native_engine_note_on(&engine, 60, 127);
     for (int b = 0; b < 10; ++b) {                   /* worker starved for 10 blocks */

@@ -183,6 +183,9 @@ static int build_sample(const scope_t *s, int depth, int group_index, ds_dsprese
         else if (!strcmp(mode, "disk_streaming")) out->playback_mode = DS_PLAYBACK_DISK_STREAMING;
     }
     out->pitch_key_track = (float)number(s, depth, "pitchKeyTrack", 1.0);
+    out->loop_crossfade = (int64_t)number(s, depth, "loopCrossfade", 0);
+    if (out->loop_crossfade < 0) out->loop_crossfade = 0;
+    out->loop_crossfade_equal_power = !(lookup(s, depth, "loopCrossfadeMode", mode, sizeof(mode)) && !strcasecmp(mode, "linear"));
     if (!lookup(s, depth, "silencedByTags", out->silenced_by, sizeof(out->silenced_by))) out->silenced_by[0] = '\0';
     out->silencing_mode = lookup(s, depth, "silencingMode", mode, sizeof(mode)) && !strcasecmp(mode, "normal")
                           ? DS_SILENCE_NORMAL : DS_SILENCE_FAST;

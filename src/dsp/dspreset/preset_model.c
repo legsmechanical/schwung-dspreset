@@ -118,6 +118,17 @@ static int target_for(const char *type, const char *level, const char *param) {
     if (!strcmp(param, "SILENCING_MODE")) return DS_TARGET_SILENCING_MODE;
     if (!strcmp(param, "SILENCING_DECAY")) return DS_TARGET_SILENCING_DECAY;
     if (!strcmp(param, "TAG_POLYPHONY")) return DS_TARGET_TAG_POLYPHONY;
+    if (!strcmp(param, "SAMPLE_START")) return DS_TARGET_SAMPLE_START;
+    if (!strcmp(param, "SAMPLE_END")) return DS_TARGET_SAMPLE_END;
+    if (!strcmp(param, "LOOP_START")) return DS_TARGET_LOOP_START;
+    if (!strcmp(param, "LOOP_END")) return DS_TARGET_LOOP_END;
+    if (!strcmp(param, "ROOT_NOTE")) return DS_TARGET_ROOT_NOTE;
+    if (!strcmp(param, "LO_NOTE")) return DS_TARGET_LO_NOTE;
+    if (!strcmp(param, "HI_NOTE")) return DS_TARGET_HI_NOTE;
+    if (!strcmp(param, "LO_VEL")) return DS_TARGET_LO_VEL;
+    if (!strcmp(param, "HI_VEL")) return DS_TARGET_HI_VEL;
+    if (!strcmp(param, "AMP_ENV_ENABLED")) return DS_TARGET_AMP_ENV_ENABLED;
+    if (!strcmp(param, "GROUP_VOLUME")) return DS_TARGET_VOLUME;
     return DS_TARGET_NONE;
 }
 

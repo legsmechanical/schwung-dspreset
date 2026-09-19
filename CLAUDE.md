@@ -193,12 +193,24 @@ voices of the note being started, so one key's layers cannot cut each other. `<t
 sets a tag's starting volume, on/off and voice limit (the oldest voice goes first).
 `pitchKeyTrack` scales the key's distance from the root (0 = root pitch everywhere).
 
+## Where a note plays
+
+Each VOICE carries its own `ds_bounds_t` (start, end, loop, crossfade), computed at note-on
+from the zone's — or recomputed when a binding moved SAMPLE_START/END or LOOP_START/END. The
+worker streams from the VOICE's bounds (read field by field, then sanitised: a restart can
+overwrite them mid-read and that fill is discarded by the publish CAS). For these, and for
+LO/HI_NOTE, LO/HI_VEL, ROOT_NOTE and AMP_ENV_ENABLED, a binding on the group wins, then on the
+instrument, then the sample's own value — every sample sets its own range, so "own wins" would
+make the knob dead. Loop crossfade (`loopCrossfade`, `loopCrossfadeMode`, equal_power default):
+over the last N frames before the loop end, the audio N frames before the loop start fades in;
+the head path mixes it on the audio thread, the worker pre-mixes it into the ring. N is clamped
+to the audio before the loop start, so a loop from frame 0 (CS-20M, DS The Synths) is unchanged.
+
 ## Not implemented yet
 
 Effects: phaser (never `schwung-drumverb`, never JUCE 8+ or `juce_dsp` code), tempo-synced
 delay, convolution, pitch shift, wave shaper/folder, group-level reverb / chorus / delay.
-Also: xy-pads, SAMPLE_START/LOOP bindings, per-sample-tag
-bindings, loop crossfades, envelope curve shapes, FLAC samples, legato/first triggers,
+Also: xy-pads, per-sample-tag bindings, envelope curve shapes, FLAC samples, legato/first triggers,
 musical-time LFO rates. Load errors reach the user through `get_error` (stock shows a "Synth
 Warning" box); status is also logged (`dspreset: loaded …` / `load failed …`).
 
