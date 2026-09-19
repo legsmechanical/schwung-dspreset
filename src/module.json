@@ -21,27 +21,43 @@
       "levels": {
         "root": {
           "name": "DSPreset",
-          "list_param": "preset",
-          "count_param": "preset_count",
-          "name_param": "preset_name",
+          "children": "main",
           "params": [
             {
               "level": "banks",
               "label": "Banks"
             },
             {
+              "level": "presets",
+              "label": "Presets"
+            },
+            {
+              "level": "main",
+              "label": "Main"
+            },
+            {
               "level": "amp",
               "label": "Amp/Voice"
             }
-          ],
-          "knobs": []
+          ]
         },
         "banks": {
           "name": "Banks",
           "label": "Select Bank",
           "items_param": "bank_list",
           "select_param": "bank",
-          "navigate_to": "root"
+          "navigate_to": "presets"
+        },
+        "presets": {
+          "name": "Presets",
+          "list_param": "preset",
+          "count_param": "preset_count",
+          "name_param": "preset_name"
+        },
+        "main": {
+          "name": "Main",
+          "params": [],
+          "knobs": []
         },
         "amp": {
           "name": "Amp/Voice",

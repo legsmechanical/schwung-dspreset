@@ -18,8 +18,15 @@ const describe = (p) => {
 };
 const seen = pages.map(describe);
 for (const p of seen) console.log(`  ${p.kind.padEnd(6)} ${String(p.name).padEnd(14)} ${p.groups.map((g) => g.kind + "[" + g.keys.join("+") + "]").join(" ")}`);
-if (seen[0].kind !== "preset") fail("the first page is not the preset browser");
-if (!seen.some((p) => p.kind === "items" && p.name === "Banks")) fail("no Banks page");
+/* Banks, Presets, Main, Amp/Voice (Josh, 2026-09-19); you land on Main */
+const order = seen.map((p) => p.kind + ":" + p.name).join(",");
+if (order !== "items:Banks,preset:Presets,knobs:Main,knobs:Amp/Voice") fail("page order: " + order);
+const { firstGrid } = await import(dir + "/page_nav.mjs");
+if (pages[firstGrid(pages)].name !== "Main") fail("lands on " + pages[firstGrid(pages)].name + ", not Main");
+if (!seen[2].keys.length) fail("Main has no knobs");
+/* choosing a bank goes to its presets: the controller's rule (page_controller, navigateTo) */
+const banks = pages[0];
+if (pages.findIndex((q) => q.level === banks.navigateTo && q.kind === "preset") !== 1) fail("choosing a bank does not open Presets");
 const amp = seen.find((p) => p.name === "Amp/Voice");
 if (!amp) fail("no Amp/Voice page");
 const env = amp.groups.find((g) => g.kind === "envelope");

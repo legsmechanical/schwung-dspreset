@@ -70,7 +70,11 @@ jog-click picker's "DSPreset Presets" row.
 ## Preset controls
 
 Each `<ui>` knob, button and menu is a param `ctl_N` (float/int, or enum of its state/option
-names), the root knobs in the preset's order (Gain lives on Amp/Voice). Moving one fires its bindings through their
+names), on the **Main** page in the preset's order (Gain lives on Amp/Voice). Pages run
+**Banks, Presets, Main, Amp/Voice** (Josh, 2026-09-19): the hosts' planner puts a level's preset
+browser first on that level, so the root declares no pages of its own — only links in that
+order — with `children: "main"` so stock's physical-knob fallback still reaches the controls.
+You land on Main; choosing a bank goes to Presets. Moving one fires its bindings through their
 translation (linear with output range, `table` — the knob position scales the table's key axis,
 the old converter's reading — or `fixed_value`, then `factor`).
 
