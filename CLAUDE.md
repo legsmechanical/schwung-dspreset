@@ -87,6 +87,12 @@ the old converter's reading — or `fixed_value`, then `factor`).
 - **One writer:** control moves from `set_param` are queued and applied on the audio thread in
   `render_block`; MIDI CC maps run in `on_midi`. The worker applies defaults (and restored
   values) BEFORE publishing an engine.
+- **A host-made CC1 is DROPPED** (`source == 3`, MOVE_MIDI_SOURCE_HOST). Both hosts send
+  CC1 = 0 on all 16 channels at boot and at every patch load, to clear a mod wheel Move left
+  raised. On a preset mapping CC1 to a knob that is a MOVE: ASIMOV's filter shut to ~70 Hz and
+  the project autosaved it silent (Josh, 2026-09-19, "track 6 doesn't make any sound"). Panic
+  (CC123) carries the same tag and must keep passing. ⚠ The fix belongs HERE, never in the host:
+  the module has to work on stock too.
 - **`is_loading`** is 1 from a pick until it plays: both hosts' module pages re-read the
   (per-preset) params on its falling edge.
 - `state` adds `"controls":"v0;v1;…"`, applied only when restoring that same preset.
